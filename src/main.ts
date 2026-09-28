@@ -95,6 +95,11 @@ let time = 0;
 const EASE_S = 0.3;
 let full = TAU * fig.a;
 let shownI = intensity(fig.a, fig.b);
+// Ruhe-Überblendung: offene echte Spur → geschlossene, flüssig drehende Figur
+const SETTLE_S = 0.35;
+let settle = 0;
+let settleA = 0;
+let settleB = 0;
 let frameNo = 0;
 
 /** Abstand der aktuellen Phase zur nächsten „perfekten" Phase eines a:b-Intervalls */
@@ -105,6 +110,27 @@ const phaseError = (a: number) => {
   if (e < -per / 2) e += per;
   return e;
 };
+// Messsonde (nur Entwicklung): pro Bild Schwerpunkt der Figur (helligkeitsgewichtet) und Nahtposition
+let probe: ((n: number, u0: number, full: number) => void) | null = null;
+const probeLog: number[][] = [];
+if (import.meta.env.DEV) {
+  (window as any).__probe = (on: boolean) => {
+    if (on) probeLog.length = 0;
+    probe = on
+      ? (n, u0, fl) => {
+          let sx = 0, sy = 0, sw = 0;
+          for (let i = 0; i < n; i++) {
+            const wgt = cols[i * 3] + cols[i * 3 + 1] + cols[i * 3 + 2];
+            sx += pts[i * 3] * wgt;
+            sy += pts[i * 3 + 1] * wgt;
+            sw += wgt;
+          }
+          probeLog.push([performance.now(), sx / sw, sy / sw, ((u0 % fl) + fl) % fl / fl, settle, rNow === state.r ? 1 : 0, thA - thStart >= full ? 1 : 0]);
+        }
+      : null;
+    return probeLog;
+  };
+}
 const hash = (x: number) => {
   const h = Math.sin(x * 127.1 + 311.7) * 43758.5453;
   return h - Math.floor(h);
@@ -645,7 +671,20 @@ function frame(now: number) {
   shownI += (I - shownI) * (1 - Math.exp(-dt / EASE_S));
   const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
   const round = span0 >= full && thA - thStart >= full;
-  const closed = round && !!state.exact && rNow === rTarget && full === fullTarget;
+
+  // Ruht das Verhältnis, wird statt der offenen echten Spur die geschlossene
+  // Nachbarfigur a:b gezeigt, deren Phase psi gleichmäßig mitläuft: keine Naht,
+  // die mit dem Punkt springt, und eine flüssige Drehung. Am Punkt (u = thA)
+  // sind beide identisch. Beim Ziehen sofort zurück zur echten Spur.
+  const rho = b / a;
+  const psi = off + (rNow - rho) * thA;
+  const resting = round && rNow === rTarget && full === fullTarget && a === settleA && b === settleB;
+  if (!resting) settle = 0;
+  else settle = Math.min(1, settle + dt / SETTLE_S);
+  settleA = a;
+  settleB = b;
+  const blend = settle * settle * (3 - 2 * settle);
+  const closed = blend >= 1;
   const overlap = round && !closed ? full * (0.15 + 0.15 * gl) : 0;
   const u0 = closed ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0 - overlap);
   const span = closed ? full : thA - u0;
@@ -656,7 +695,9 @@ function frame(now: number) {
   for (let i = 0; i < n; i++) {
     const f = i / (n - 1);
     const u = u0 + span * f;
-    wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
+    let y = Math.sin(rNow * u + off);
+    if (blend > 0) y += (Math.sin(rho * u + psi) - y) * blend;
+    wobble(Math.sin(u), y, time, amp, w);
     pts[i * 3] = w.x;
     pts[i * 3 + 1] = w.y;
     pts[i * 3 + 2] = 0;
@@ -672,13 +713,14 @@ function frame(now: number) {
       flicker = 1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6) + 0.14 * gl * (hash(chunk * 3.1 + frameNo * 0.37) - 0.5);
     }
     s = (hv * s + vs * shownI) * flicker;
-    if (overlap > 0) s *= smoothstep(0, overlap, u - u0); // weiche Naht statt Kante
+    if (overlap > 0) s *= 1 - (1 - smoothstep(0, overlap, u - u0)) * (1 - blend); // weiche Naht statt Kante
     const ci = paletteIndex(u / full);
     cols[i * 3] = PALETTE[ci] * s;
     cols[i * 3 + 1] = PALETTE[ci + 1] * s;
     cols[i * 3 + 2] = PALETTE[ci + 2] * s;
   }
   stage.curve.set(pts, cols, n);
+  if (import.meta.env.DEV && probe) probe(n, u0, full);
   wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
   stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
   stage.setHeadVisibility(hv);
