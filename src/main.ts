@@ -85,8 +85,10 @@ let rNow = state.r; // gleitet zum Ziel state.r
 
 let flashX = 0;
 let flashY = 0;
-let schedA = 0; // bis hierhin sind Anschläge im Audio-Takt geplant
-let schedB = 0;
+// Tonplanung: eigene, nur vorwärts laufende Phasen je Ton, gültig bis schedT
+let schedT = 0;
+const audioPh = [0, 0];
+let strikeCount = [0, 0]; // für Tests
 let holdingBase = false;
 let time = 0;
 let frameNo = 0;
@@ -480,9 +482,11 @@ window.addEventListener('resize', layout);
 const LOOKAHEAD = 0.12;
 
 /**
- * Nulldurchgänge der nächsten ~120 ms vorausberechnen und sample-genau als
- * Anschläge planen. Sind die Schläge so dicht, dass die Stimme ohnehin nicht
- * mehr abklingt, wird sie einfach gehalten.
+ * Anschläge sample-genau ~120 ms im Voraus planen. Die Tonplanung zählt mit
+ * eigenen Phasen, die nur vorwärts laufen: Jeder Planungsschritt schließt
+ * lückenlos an den vorigen an und wird dabei sanft auf die Animation gezogen.
+ * So wird jeder Nulldurchgang genau einmal angeschlagen – auch wenn Bild- und
+ * Audiotakt ein paar Millisekunden gegeneinander zittern.
  */
 function scheduleHits(tempoEff: number, thB: number) {
   if (!audio.ready) return;
@@ -490,29 +494,41 @@ function scheduleHits(tempoEff: number, thB: number) {
   const horizon = tNow + LOOKAHEAD;
   const wA = TAU * tempoEff;
   const sus = sustainAmount(tempoEff);
-  const axes: [0 | 1, number, number][] = [
-    [0, thA, wA],
-    [1, thB, wA * rNow],
-  ];
-  for (const [axis, th, w] of axes) {
-    let from = axis === 0 ? schedA : schedB;
-    if (from < tNow) from = tNow;
+  const visual = [thA, thB];
+  const ws = [wA, wA * rNow];
+  // (Neu-)Start nach Pause oder Hänger: an die Animation anlegen, ohne nachzuholen
+  if (schedT < tNow) {
+    schedT = tNow;
+    audioPh[0] = visual[0];
+    audioPh[1] = visual[1];
+  }
+  const span = horizon - schedT;
+  if (span <= 0) return;
+  for (const axis of [0, 1] as const) {
+    const w = ws[axis];
     const rate = w / Math.PI; // zwei Nulldurchgänge pro Schwingung
+    // wo die Animation zum Planungshorizont sein wird
+    let target = visual[axis] + w * (horizon - tNow);
+    const from = audioPh[axis];
+    if (target < from) target = from; // nie rückwärts zählen
+    // großer Sprung (z. B. Tab war im Hintergrund): nicht alles nachholen
+    const jump = target - from > w * 0.3 + TAU;
     if (axis === 0 && holdingBase) {
       // Grundton wird gerade gehalten
     } else if (sus > 0.995) {
       audio.hold(axis);
-    } else if (w > 1e-4) {
-      let k = Math.floor((th + w * (from - tNow)) / Math.PI) + 1;
-      for (let guard = 0; guard < 200; guard++, k++) {
-        const t = tNow + (k * Math.PI - th) / w;
-        if (t > horizon) break;
-        if (t >= from) audio.strike(axis, t, rate, sus);
+    } else if (!jump && target > from) {
+      const k0 = Math.floor(from / Math.PI) + 1;
+      const k1 = Math.floor(target / Math.PI);
+      for (let k = k0; k <= k1 && k - k0 < 200; k++) {
+        const t = schedT + ((k * Math.PI - from) / (target - from)) * span;
+        audio.strike(axis, t, rate, sus);
+        strikeCount[axis]++;
       }
     }
-    if (axis === 0) schedA = horizon;
-    else schedB = horizon;
+    audioPh[axis] = target;
   }
+  schedT = horizon;
 }
 
 /* ---------- Schleife ---------- */
@@ -655,4 +671,4 @@ updateTexts();
 layout();
 requestAnimationFrame(frame);
 
-if (import.meta.env.DEV) (window as any).__lj = { stage, state };
+if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]) };
