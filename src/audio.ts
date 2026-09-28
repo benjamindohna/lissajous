@@ -39,7 +39,7 @@ const SPECS: Record<Klang, Spec> = {
 // Übergang Einzelschläge → gehaltener Ton, gemessen am Tempo von Ton A (Hz, logarithmisch).
 // Beide Töne gehen gemeinsam über, damit es an derselben Reglerstelle passiert.
 const SUSTAIN_FROM = 17;
-const SUSTAIN_TO = 23;
+const SUSTAIN_TO = 24;
 
 /** 0 = einzelne Schläge, 1 = gehaltener Ton */
 export function sustainAmount(tempo: number) {
@@ -49,7 +49,7 @@ export function sustainAmount(tempo: number) {
 }
 
 const LEVEL_STRIKE = 0.5;
-const LEVEL_HOLD = 0.24;
+const LEVEL_HOLD = 0.44;
 
 class Voice {
   private oscs: OscillatorNode[] = [];

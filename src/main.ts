@@ -18,7 +18,7 @@ const state = {
   snap: true,
   wobble: 0.4,
   tempo: 0.4, // Hz, sichtbare Schwingung von Ton A im Zeichnen-Modus
-  tempoV: 250, // Reglerstellung, damit „Echtzeit" beim Grundtonwechsel mitwandert
+  tempoV: 250, // Reglerstellung 0..1000
   trail: 'tail' as Trail,
   tail: 1.5, // Sekunden
   zen: false,
@@ -34,6 +34,7 @@ const SNAP_CENTS = 35; // Fangbereich beim Loslassen
 const NEAR_CENTS = 45; // bis hier „fast Quinte"
 const DRIFT_HZ = 8; // Drehgeschwindigkeit freier Verhältnisse im Form-Modus
 const TEMPO_MIN = 0.08;
+const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const DISSOLVE_S = 0.9; // radioaktives Verschwinden/Erscheinen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
 const HIT_FADE: [number, number] = [4, 14]; // Hz: Achsenmarkierungen hören auf zu blitzen
@@ -48,7 +49,7 @@ const smoothstep = (a: number, b: number, x: number) => {
 
 // Regler-Abbildungen (logarithmisch, wo es sich musikalisch/zeitlich so anfühlt)
 const baseFromSlider = (v: number) => 110 * Math.pow(2, (3 * v) / 1000);
-const tempoFromSlider = (v: number) => (v >= 995 ? state.base : TEMPO_MIN * Math.pow(state.base / TEMPO_MIN, v / 1000));
+const tempoFromSlider = (v: number) => TEMPO_MIN * Math.pow(TEMPO_MAX / TEMPO_MIN, v / 1000);
 const tailFromSlider = (v: number) => 0.3 * Math.pow(5 / 0.3, v / 1000);
 const ratioFromSlider = (v: number) => Math.pow(2, v / 10000);
 const sliderFromRatio = (r: number) => Math.round(Math.min(1, Math.max(0, Math.log2(r))) * 10000);
@@ -140,7 +141,7 @@ function updateTexts() {
   if (state.exact) {
     const real = (a / state.base) * 1000;
     meta =
-      state.mode === 'form' || state.tempoV >= 995
+      state.mode === 'form'
         ? `schließt sich nach ${a}× A und ${b}× B · in Echtzeit ${fmt(real, real < 10 ? 1 : 0)} ms`
         : `schließt sich nach ${a}× A und ${b}× B · hier ${fmt(a / state.tempo)} s`;
   } else {
@@ -156,7 +157,7 @@ function updateTexts() {
   $('phaseVal').textContent = `${Math.round((state.phase / TAU) * 360)}°`;
   $('wobbleVal').textContent = state.wobble === 0 ? 'aus' : `${Math.round(state.wobble * 100)} %`;
   $('tempoVal').textContent =
-    state.tempoV >= 995 ? 'Echtzeit' : `${fmt(state.tempo, state.tempo < 1 ? 2 : state.tempo < 10 ? 1 : 0)} Hz`;
+    state.tempoV >= 1000 ? `${TEMPO_MAX} Hz · Ton` : `${fmt(state.tempo, state.tempo < 1 ? 2 : state.tempo < 10 ? 1 : 0)} Hz`;
   $('tailVal').textContent = `${fmt(state.tail)} s`;
   $('volumeVal').textContent = state.volume === 0 ? 'stumm' : `${Math.round(state.volume * 100)} %`;
 
@@ -447,7 +448,6 @@ window.addEventListener('pointerup', release);
 window.addEventListener('pointercancel', release);
 baseSlider.addEventListener('input', () => {
   state.base = baseFromSlider(+baseSlider.value);
-  state.tempo = tempoFromSlider(state.tempoV); // „Echtzeit" hängt am Grundton
   updateTexts();
 });
 
@@ -656,7 +656,7 @@ function frame(now: number) {
     const span = thA - u0;
     const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
     const Id = I * 1.25;
-    const hv = 1 - smoothstep(3, 12, tempoEff); // bei Echtzeit: gleichmäßig wie die Form
+    const hv = 1 - smoothstep(3, 12, tempoEff); // schnell: gleichmäßig wie die Form
     for (let i = 0; i < n; i++) {
       const u = u0 + (span * i) / (n - 1);
       wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
