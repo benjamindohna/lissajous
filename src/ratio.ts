@@ -67,3 +67,19 @@ export function formatNote(freq: number): string {
   if (Math.abs(cents) < 2) return name;
   return `${name} ${cents > 0 ? '+' : '−'}${Math.abs(cents)} ct`;
 }
+
+/**
+ * Kleinstes a (A-Schwingungen), bei dem r·a fast ganzzahlig ist. Der Rest
+ * delta = r·a − b bestimmt, wie schnell die Figur driftet (dreht).
+ */
+export function approximate(r: number, tol = 0.03): { a: number; b: number; delta: number } {
+  for (let a = 1; a <= MAX_TERM; a++) {
+    const b = Math.round(r * a);
+    const delta = r * a - b;
+    if (b >= 1 && b <= MAX_TERM && Math.abs(delta) <= tol) return { a, b, delta };
+  }
+  const b = Math.max(1, Math.round(r * MAX_TERM));
+  return { a: MAX_TERM, b, delta: r * MAX_TERM - b };
+}
+
+export const cents = (r: number) => 1200 * Math.log2(r);
