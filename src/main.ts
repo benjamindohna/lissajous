@@ -35,9 +35,6 @@ const NEAR_CENTS = 45; // bis hier „fast Quinte"
 const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
-// Phasenführung beim Ziehen: aus unter 45 % sichtbarer Figur, voll ab 90 %
-const GUIDE_FROM = 0.45;
-const GUIDE_TO = 0.9;
 const HEAD_FADE: [number, number] = [2.5, 8]; // Hz: Kopf/Blitzen → ruhige Form (vor dem Stroboskop-Effekt)
 const GLIMMER: [number, number] = [8, 20]; // Hz: leichtes Glimmen/Flimmern der ruhigen Form
 
@@ -575,41 +572,65 @@ function scheduleHits(tempoEff: number, thB: number) {
 /* ---------- Phase mitführen ---------- */
 
 /**
- * Jedes saubere Intervall a:b hat „perfekte" Phasen: off ≡ Phase (mod 2π/a).
- * Läuft das Verhältnis auf ein Intervall zu, wird die Phasenabweichung um genau
- * den Anteil verkleinert, um den der Abstand (in Cent) geschrumpft ist. Beim
- * Ankommen ist sie null – die Form ist sofort perfekt, ohne Nachjustieren.
- * Das gilt nur, soweit man die Figur sehen kann (figureVisibility): Sieht man
- * nur einen Punkt mit Schweif, bleibt die Phase unangetastet.
+ * Phasen-Mapping entlang des Reglers. Jedes sichtbare Intervall a:b ist ein
+ * Eckpfeiler mit „perfekter" Phase (off ≡ Phase mod 2π/a, von mehreren
+ * gleichwertigen die nächstliegende). Dazwischen wird in Cent interpoliert:
+ * gezogen wird zu einer Mischung der beiden Nachbar-Eckpfeiler, die am
+ * Eckpfeiler selbst ganz dessen perfekte Phase ist.
+ *
+ * Wirkt nur, solange sich das Verhältnis bewegt – im Stillstand läuft die
+ * Phase frei, damit freie Verhältnisse sich natürlich drehen. Steht man exakt
+ * auf einem Intervall, zieht es weiter sanft zur perfekten Form.
+ * Die Reaktionszeit hängt am Tempo: langsam gemächlich, schnell sofort.
  */
-function guidePhase(rFrom: number, rTo: number) {
-  if (rFrom === rTo) return;
-  let a: number;
-  let b: number;
-  if (state.exact) [a, b] = state.exact;
-  else ({ a, b } = nearestPreset(rTo).preset);
-  const goal = cents(b / a);
-  const dFrom = Math.abs(cents(rFrom) - goal);
-  const dTo = Math.abs(cents(rTo) - goal);
-  if (!(dTo < dFrom)) return; // entfernt sich: nichts tun
-  // nur so stark, wie man die Zielfigur überhaupt sehen kann
-  const g = smoothstep(GUIDE_FROM, GUIDE_TO, figureVisibility(a));
-  if (g > 0) off -= phaseError(a) * (1 - dTo / dFrom) * g;
+function pullPhase(dt: number, tempoEff: number) {
+  const moving = rNow !== state.r;
+  let e: number;
+  if (moving) {
+    const anchors = visiblePresets().map((p) => ({ c: cents(p.b / p.a), a: p.a }));
+    if (state.exact) anchors.push({ c: cents(state.exact[1] / state.exact[0]), a: state.exact[0] });
+    anchors.sort((x, y) => x.c - y.c);
+    const c = cents(rNow);
+    let lo = anchors[0];
+    let hi = anchors[anchors.length - 1];
+    for (const an of anchors) {
+      if (an.c <= c) lo = an;
+      if (an.c >= c) {
+        hi = an;
+        break;
+      }
+    }
+    if (c <= anchors[0].c) hi = lo = anchors[0];
+    if (c >= anchors[anchors.length - 1].c) lo = hi = anchors[anchors.length - 1];
+    const wHi = hi.c > lo.c ? (c - lo.c) / (hi.c - lo.c) : 0;
+    e = (1 - wHi) * phaseError(lo.a) + wHi * phaseError(hi.a);
+  } else if (state.exact) {
+    e = phaseError(state.exact[0]);
+  } else {
+    return; // freies Verhältnis in Ruhe: dreht sich natürlich
+  }
+  off -= e * (1 - Math.exp(-dt / reactionTime(tempoEff)));
 }
 
-/**
- * Wie viel einer a:b-Figur gerade zu sehen ist (0..1). Die Figur ist nach a
- * Schwingungen von A vollständig. Bleibt: was schon gezeichnet ist. Schweif:
- * Tempo × Schweiflänge; langsam zählt nur der hellere vordere Teil (~58 %),
- * schnell leuchtet die Spur gleichmäßig und zählt ganz.
- */
-function figureVisibility(a: number) {
-  const cycles = a;
-  if (state.trail === 'keep') return Math.min(1, (thA - thStart) / (TAU * cycles));
-  const lt = Math.log(Math.max(state.tempo, 1e-3));
-  const even = smoothstep(Math.log(HEAD_FADE[0]), Math.log(HEAD_FADE[1]), lt);
-  const readable = state.tempo * state.tail * (0.58 + 0.42 * even);
-  return Math.min(1, readable / cycles);
+/** Reaktionszeit der Phase: <1 Hz ~20 s, 6 Hz ~4 s, 12 Hz ~1 s, ab 18 Hz sofort */
+const REACTION: [number, number][] = [
+  [1, 20],
+  [6, 4],
+  [12, 1],
+  [18, 0.08],
+  [24, 0.04],
+];
+function reactionTime(tempo: number) {
+  if (tempo <= REACTION[0][0]) return REACTION[0][1];
+  for (let i = 1; i < REACTION.length; i++) {
+    const [t1, r1] = REACTION[i];
+    if (tempo <= t1) {
+      const [t0, r0] = REACTION[i - 1];
+      const f = Math.log(tempo / t0) / Math.log(t1 / t0);
+      return Math.exp(Math.log(r0) + (Math.log(r1) - Math.log(r0)) * f);
+    }
+  }
+  return REACTION[REACTION.length - 1][1];
 }
 
 /* ---------- Schleife ---------- */
@@ -648,7 +669,6 @@ function frame(now: number) {
   const rNext = rNow * Math.pow(rTarget / rNow, 1 - Math.exp(-dt / 0.09));
   const rNew = Math.abs(rNext - rTarget) < 1e-5 * rTarget ? rTarget : rNext;
   off -= (rNew - rNow) * thA;
-  guidePhase(rNow, rNew);
   rNow = rNew;
 
   const { a, b } = fig;
@@ -659,6 +679,7 @@ function frame(now: number) {
   const omegaNom = TAU * state.tempo;
   const prevA = thA;
   thA += TAU * tempoEff * dt;
+  pullPhase(dt, tempoEff);
 
   // Kein Nachjustieren der Phase: ein Intervall kommt genau so an, wie es gerade
   // schwingt (Neu zeichnen startet wieder mit beiden Tönen bei null)
@@ -771,4 +792,4 @@ updateTexts();
 layout();
 requestAnimationFrame(frame);
 
-if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), visibility: figureVisibility, phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
+if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
