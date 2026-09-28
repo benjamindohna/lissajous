@@ -447,7 +447,12 @@ document.querySelectorAll<HTMLButtonElement>('#trailSeg button').forEach((b) =>
 );
 
 $('restartBtn').addEventListener('click', () => {
-  thStart = thA;
+  // von vorn: beide Töne bei null, Tonplanung neu anlegen
+  thA = 0;
+  off = state.phase;
+  thStart = 0;
+  lastThB = off;
+  schedT = 0;
 });
 $('zenBtn').addEventListener('click', () => setZen(true));
 canvas.addEventListener('click', () => {
@@ -554,7 +559,6 @@ function frame(now: number) {
   rNow = rNew;
 
   const { a, b } = fig;
-  const phase = state.phase;
   const amp = state.wobble * 0.035;
   const I = intensity(a, b);
 
@@ -563,12 +567,8 @@ function frame(now: number) {
   const prevA = thA;
   thA += TAU * tempoEff * dt;
 
-  // saubere Verhältnisse: Punkt gleitet auf die kanonische Spur
-  if (state.exact && rNow === rTarget) {
-    const k = Math.round(((off - phase) * a) / TAU);
-    const target = phase + (TAU * k) / a;
-    off += (target - off) * (1 - Math.exp(-dt / 0.35));
-  }
+  // Kein Nachjustieren der Phase: ein Intervall kommt genau so an, wie es gerade
+  // schwingt (Neu zeichnen startet wieder mit beiden Tönen bei null)
   const thB = rNow * thA + off;
 
   // hv: Kopf, Nahtstelle, Achsenpunkte (weg, bevor der Stroboskop-Effekt einsetzt)
