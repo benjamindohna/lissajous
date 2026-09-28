@@ -35,7 +35,9 @@ const NEAR_CENTS = 45; // bis hier „fast Quinte"
 const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
-const VIS_FADE: [number, number] = [6, 22]; // Hz: Punkt/Blitzen → ruhige, glimmende Form
+const HEAD_FADE: [number, number] = [2.5, 8]; // Hz: Kopf/Blitzen → ruhige Form (vor dem Stroboskop-Effekt)
+const GLIMMER: [number, number] = [8, 20]; // Hz: leichtes Glimmen/Flimmern der ruhigen Form
+const MORPH_S = 0.45; // Formwechsel
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number, d = 1) => v.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: 0 });
@@ -88,6 +90,26 @@ let schedA = 0; // bis hierhin sind Anschläge im Audio-Takt geplant
 let schedB = 0;
 let holdingBase = false;
 let time = 0;
+let frameNo = 0;
+
+// Formwechsel-Morph: letzte gezeigte Form (ohne Wabbeln) als Ausgangspunkt
+const shapeBuf = new Float32Array(MAX_POINTS * 2);
+const morphFrom = new Float32Array(MAX_POINTS * 2);
+let shapeN = 0;
+let morphN = 0;
+let morphT = 1;
+let shapeA = 0;
+let shapeB = 0;
+
+const easeOutBack = (t: number) => {
+  const c = 1.3;
+  const u = t - 1;
+  return 1 + (c + 1) * u * u * u + c * u * u;
+};
+const hash = (x: number) => {
+  const h = Math.sin(x * 127.1 + 311.7) * 43758.5453;
+  return h - Math.floor(h);
+};
 
 const freqB = () => state.base * rNow;
 
@@ -139,7 +161,7 @@ function updateTexts() {
   $('phaseVal').textContent = `${Math.round((state.phase / TAU) * 360)}°`;
   $('wobbleVal').textContent = state.wobble === 0 ? 'aus' : `${Math.round(state.wobble * 100)} %`;
   $('tempoVal').textContent =
-    state.tempoV >= 1000 ? `${TEMPO_MAX} Hz · Ton` : `${fmt(state.tempo, state.tempo < 1 ? 2 : state.tempo < 10 ? 1 : 0)} Hz`;
+    `${fmt(state.tempo, state.tempo < 1 ? 2 : state.tempo < 10 ? 1 : 0)} Hz`;
   $('tailVal').textContent = `${fmt(state.tail)} s`;
   $('volumeVal').textContent = state.volume === 0 ? 'stumm' : `${Math.round(state.volume * 100)} %`;
 
@@ -517,6 +539,7 @@ function frame(now: number) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   time += dt;
+  frameNo++;
 
   stepPalette(dt);
   speed += ((state.playing ? 1 : 0) - speed) * (1 - Math.exp(-dt / BRAKE_TAU));
@@ -525,7 +548,7 @@ function frame(now: number) {
   // Verhältnis gleitet; die Phase von B wird so nachgeführt, dass der Punkt nicht springt
   const rTarget = state.r;
   const rNext = rNow * Math.pow(rTarget / rNow, 1 - Math.exp(-dt / 0.09));
-  const rNew = Math.abs(rNext - rTarget) < 1e-7 ? rTarget : rNext;
+  const rNew = Math.abs(rNext - rTarget) < 1e-5 * rTarget ? rTarget : rNext;
   off -= (rNew - rNow) * thA;
   rNow = rNew;
 
@@ -547,30 +570,66 @@ function frame(now: number) {
   }
   const thB = rNow * thA + off;
 
-  // Anschläge im Audio-Takt; die Markierungen blitzen nur bei langsamem Tempo
-  const vs = smoothstep(Math.log(VIS_FADE[0]), Math.log(VIS_FADE[1]), Math.log(Math.max(tempoEff, 1e-3)));
+  // Gezeichnet wird immer die geschlossene Figur a:b. Bei freien Verhältnissen
+  // wandert ihre Phase psi mit – so dreht sie sich, bleibt aber immer geschlossen.
+  // Am Kopf (u = thA) stimmt sie exakt mit der echten Bewegung überein.
+  const rho = b / a;
+  const psi = off + (rNow - rho) * thA;
+
+  // hv: Kopf, Nahtstelle, Achsenpunkte (weg, bevor der Stroboskop-Effekt einsetzt)
+  // vs: ruhige, gleichmäßige Form; gl: bewusstes Glimmen bei hohem Tempo
+  const lt = Math.log(Math.max(tempoEff, 1e-3));
+  const vs = smoothstep(Math.log(HEAD_FADE[0]), Math.log(HEAD_FADE[1]), lt);
   const hv = 1 - vs;
+  const gl = smoothstep(Math.log(GLIMMER[0]), Math.log(GLIMMER[1]), lt);
   if (state.playing) scheduleHits(tempoEff, thB);
   if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) flashX = Math.max(flashX, hv);
   if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, hv);
   lastThB = thB;
 
-  // Spur analytisch aus der aktuellen Bewegung – ändert sich live beim Ziehen
+  // Spur: ganze Figur in fester Reihenfolge (sonst wechselt an Kreuzungen,
+  // welche Linie oben liegt) oder nur der Schweif hinter dem Kopf
   const keep = state.trail === 'keep';
   const full = TAU * a;
   const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
-  // Zeigt die Spur die ganze Figur, wird sie in fester Reihenfolge gezeichnet
-  // (ab einem Periodenanfang). Sonst wechselt an Kreuzungen ständig, welche
-  // Linie oben liegt – das sah aus wie Blinken.
   const whole = span0 >= full && thA - thStart >= full;
   const u0 = whole ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0);
   const span = whole ? full : thA - u0;
-  const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
+  const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rho) * span) / TAU) * 80) + 2));
+
+  // Formwechsel: vom zuletzt gezeigten Bild weich (mit leichtem Überschwingen) in die neue Figur
+  if (a !== shapeA || b !== shapeB) {
+    if (shapeN > 1) {
+      morphFrom.set(shapeBuf.subarray(0, shapeN * 2));
+      morphN = shapeN;
+      morphT = 0;
+    }
+    shapeA = a;
+    shapeB = b;
+  }
+  morphT = Math.min(1, morphT + dt / MORPH_S);
+  const mk = morphT >= 1 ? 1 : easeOutBack(morphT);
+
   const Id = I * 1.25;
-  const shimmer = 0.22 * state.wobble * vs;
+  const shimmer = 0.22 * state.wobble * gl;
   for (let i = 0; i < n; i++) {
-    const u = u0 + (span * i) / (n - 1);
-    wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
+    const f = i / (n - 1);
+    const u = u0 + span * f;
+    let x = Math.sin(u);
+    let y = Math.sin(rho * u + psi);
+    if (mk < 1) {
+      const j = f * (morphN - 1);
+      const j0 = Math.floor(j);
+      const j1 = Math.min(morphN - 1, j0 + 1);
+      const t = j - j0;
+      const ox = morphFrom[j0 * 2] + (morphFrom[j1 * 2] - morphFrom[j0 * 2]) * t;
+      const oy = morphFrom[j0 * 2 + 1] + (morphFrom[j1 * 2 + 1] - morphFrom[j0 * 2 + 1]) * t;
+      x = ox + (x - ox) * mk;
+      y = oy + (y - oy) * mk;
+    }
+    shapeBuf[i * 2] = x; // gezeigte Form, Startpunkt für den nächsten Wechsel
+    shapeBuf[i * 2 + 1] = y;
+    wobble(x, y, time, amp, w);
     pts[i * 3] = w.x;
     pts[i * 3 + 1] = w.y;
     pts[i * 3 + 2] = 0;
@@ -579,14 +638,19 @@ function frame(now: number) {
     let s: number;
     if (keep) s = Id * 0.5 + Id * 1.1 * Math.exp(-age / 0.45) + 1.1 * Math.exp(-age / 0.08);
     else s = Id * Math.pow(Math.max(0, 1 - age / state.tail), 1.6) + 1.1 * Math.exp(-age / 0.08);
-    // schnell: Spur geht in die gleichmäßig leuchtende, leicht glimmende Form über
-    const f = (u - u0) / full;
-    s = hv * s + vs * I * (1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6));
-    const ci = paletteIndex(u / full);
+    // schnell: gleichmäßig leuchtende Form, die leicht glimmt und flimmert
+    let flicker = 1;
+    if (gl > 0) {
+      const chunk = Math.floor(f * 48);
+      flicker = 1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6) + 0.14 * gl * (hash(chunk * 3.1 + frameNo * 0.37) - 0.5);
+    }
+    s = (hv * s + vs * I) * flicker;
+    const ci = paletteIndex(f * (span / full) + u0 / full);
     cols[i * 3] = PALETTE[ci] * s;
     cols[i * 3 + 1] = PALETTE[ci + 1] * s;
     cols[i * 3 + 2] = PALETTE[ci + 2] * s;
   }
+  shapeN = n;
   stage.curve.set(pts, cols, n);
   wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
   stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
@@ -596,7 +660,7 @@ function frame(now: number) {
   flashX *= decay;
   flashY *= decay;
   // schnell: statt hektischem Blitzen ein ruhiges Glimmen der Mittelmarkierungen
-  const glim = vs * (0.22 + 0.1 * Math.sin(time * 1.7));
+  const glim = gl * (0.22 + 0.1 * Math.sin(time * 1.7));
   stage.setTicks(Math.max(flashX, glim), Math.max(flashY, glim * (1 + 0.15 * Math.sin(time * 2.3 + 1))), hv);
   stage.bloom.strength = 0.75 + state.wobble * 0.18 * Math.sin(time * 2.3) * Math.sin(time * 0.7 + 1);
 

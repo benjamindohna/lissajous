@@ -653,7 +653,7 @@ body:not(.axis-labels) .axislabel {
   margin: 0;
 }
 .row.main .tempo-row .val {
-  min-width: 44px;
+  width: 52px;
 }
 .tempo-row .lbl {
   padding-left: 2px;
