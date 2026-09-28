@@ -93,6 +93,14 @@ let holdingBase = false;
 let time = 0;
 let frameNo = 0;
 
+/** Abstand der aktuellen Phase zur nächsten „perfekten" Phase eines a:b-Intervalls */
+const phaseError = (a: number) => {
+  const per = TAU / a;
+  let e = (off - state.phase) % per;
+  if (e > per / 2) e -= per;
+  if (e < -per / 2) e += per;
+  return e;
+};
 const hash = (x: number) => {
   const h = Math.sin(x * 127.1 + 311.7) * 43758.5453;
   return h - Math.floor(h);
@@ -536,6 +544,27 @@ function scheduleHits(tempoEff: number, thB: number) {
   schedT = horizon;
 }
 
+/* ---------- Phase mitführen ---------- */
+
+/**
+ * Jedes saubere Intervall a:b hat „perfekte" Phasen: off ≡ Phase (mod 2π/a).
+ * Läuft das Verhältnis auf ein Intervall zu, wird die Phasenabweichung um genau
+ * den Anteil verkleinert, um den der Abstand (in Cent) geschrumpft ist. Beim
+ * Ankommen ist sie null – die Form ist sofort perfekt, ohne Nachjustieren.
+ */
+function guidePhase(rFrom: number, rTo: number) {
+  if (rFrom === rTo) return;
+  let a: number;
+  let b: number;
+  if (state.exact) [a, b] = state.exact;
+  else ({ a, b } = nearestPreset(rTo).preset);
+  const goal = cents(b / a);
+  const dFrom = Math.abs(cents(rFrom) - goal);
+  const dTo = Math.abs(cents(rTo) - goal);
+  if (!(dTo < dFrom)) return; // entfernt sich: nichts tun
+  off -= phaseError(a) * (1 - dTo / dFrom);
+}
+
 /* ---------- Schleife ---------- */
 
 const w = { x: 0, y: 0 };
@@ -551,11 +580,28 @@ function frame(now: number) {
   speed += ((state.playing ? 1 : 0) - speed) * (1 - Math.exp(-dt / BRAKE_TAU));
   if (speed < 0.002 && !state.playing) speed = 0;
 
+  // Phasenzähler klein halten (ganze Figurenperioden abziehen, am Bild ändert sich
+  // nichts). Sonst würde ein Verhältniswechsel mit wachsender Laufzeit immer wilder.
+  const fullA = TAU * fig.a;
+  if (thA > 3 * fullA) {
+    const dA = (Math.floor(thA / fullA) - 1) * fullA;
+    const thBold = rNow * thA + off;
+    thA -= dA;
+    off += rNow * dA;
+    off -= Math.round(off / TAU) * TAU;
+    const dB = thBold - (rNow * thA + off);
+    thStart -= dA;
+    lastThB -= dB;
+    audioPh[0] -= dA;
+    audioPh[1] -= dB;
+  }
+
   // Verhältnis gleitet; die Phase von B wird so nachgeführt, dass der Punkt nicht springt
   const rTarget = state.r;
   const rNext = rNow * Math.pow(rTarget / rNow, 1 - Math.exp(-dt / 0.09));
   const rNew = Math.abs(rNext - rTarget) < 1e-5 * rTarget ? rTarget : rNext;
   off -= (rNew - rNow) * thA;
+  guidePhase(rNow, rNew);
   rNow = rNew;
 
   const { a, b } = fig;
@@ -671,4 +717,4 @@ updateTexts();
 layout();
 requestAnimationFrame(frame);
 
-if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]) };
+if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
