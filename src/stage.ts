@@ -98,6 +98,20 @@ export class Stage {
     this.scene.add(this.guides);
   }
 
+  setGlow(hex: string) {
+    this.halo.material.color.set(hex);
+    this.dotX.material.color.set(hex).lerp(new THREE.Color(0xffffff), 0.4);
+    this.dotY.material.color.copy(this.dotX.material.color);
+    (this.guides.material as THREE.LineBasicMaterial).color.set(hex);
+  }
+
+  /** Kopf ausblenden, wenn er zu schnell ist, um ihn noch zu sehen */
+  setHeadVisibility(v: number) {
+    this.head.material.opacity = v;
+    this.halo.material.opacity = 0.35 * v;
+    (this.guides.material as THREE.LineBasicMaterial).opacity = 0.16 * v;
+  }
+
   setDrawDecor(visible: boolean) {
     this.head.visible = this.halo.visible = visible;
     this.dotX.visible = this.dotY.visible = visible;

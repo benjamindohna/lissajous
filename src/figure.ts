@@ -3,12 +3,14 @@ import { MAX_POINTS } from './stage';
 
 export const TAU = Math.PI * 2;
 
-// Farbverlauf entlang der Kurve, zyklisch (Anfang = Ende)
-const STOPS = ['#3ee0ff', '#4a7dff', '#a45bff', '#ff5fd2', '#3ee0ff'];
+// Farbverlauf entlang der Kurve, zyklisch (Anfang = Ende). Beim Themenwechsel
+// blendet PALETTE weich zur neuen Zielpalette über.
 const LUT_SIZE = 512;
-export const PALETTE = (() => {
-  const cols = STOPS.map((s) => new THREE.Color(s)); // wird linear gespeichert
-  const lut = new Float32Array(LUT_SIZE * 3);
+export const PALETTE = new Float32Array(LUT_SIZE * 3);
+const paletteTarget = new Float32Array(LUT_SIZE * 3);
+
+function buildPalette(stops: string[], out: Float32Array) {
+  const cols = [...stops, stops[0]].map((s) => new THREE.Color(s)); // wird linear gespeichert
   for (let i = 0; i < LUT_SIZE; i++) {
     const t = (i / LUT_SIZE) * (cols.length - 1);
     const k = Math.floor(t);
@@ -16,12 +18,21 @@ export const PALETTE = (() => {
     const s = f * f * (3 - 2 * f);
     const a = cols[k];
     const b = cols[k + 1];
-    lut[i * 3] = a.r + (b.r - a.r) * s;
-    lut[i * 3 + 1] = a.g + (b.g - a.g) * s;
-    lut[i * 3 + 2] = a.b + (b.b - a.b) * s;
+    out[i * 3] = a.r + (b.r - a.r) * s;
+    out[i * 3 + 1] = a.g + (b.g - a.g) * s;
+    out[i * 3 + 2] = a.b + (b.b - a.b) * s;
   }
-  return lut;
-})();
+}
+
+export function setPalette(stops: string[], immediate = false) {
+  buildPalette(stops, paletteTarget);
+  if (immediate) PALETTE.set(paletteTarget);
+}
+
+export function stepPalette(dt: number) {
+  const k = 1 - Math.exp(-dt * 5);
+  for (let i = 0; i < PALETTE.length; i++) PALETTE[i] += (paletteTarget[i] - PALETTE[i]) * k;
+}
 
 export function paletteIndex(t: number) {
   const f = t - Math.floor(t);
@@ -124,6 +135,12 @@ export class SpringCurve {
       }
     }
   }
+}
+
+/** billiges Pseudo-Zufallsrauschen 0..1 */
+export function hash(n: number) {
+  const s = Math.sin(n * 127.1 + 311.7) * 43758.5453;
+  return s - Math.floor(s);
 }
 
 /** Arbeitspuffer für die Linie */
