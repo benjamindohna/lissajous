@@ -1,53 +1,176 @@
 /**
- * Klang: Dauerton (A + B) und kurze Anschläge für den Zeichnen-Modus.
- * Alles synthetisch. Beim Pausieren fängt ein kurzes Echo das Ausklingen auf.
+ * Klang: pro Ton eine durchgehend schwingende Stimme (wie eine Saite).
+ * Ein Anschlag regt sie nur neu an. Langsam angeschlagen klingt sie zwischen
+ * den Schlägen aus; je dichter die Schläge, desto länger klingt sie nach, bis
+ * sie nie mehr leiser wird – dann ist es ein gehaltener Ton mit demselben Klang.
+ * Beim Pausieren fängt ein kurzes Echo das Ausklingen auf.
  */
-export type Klang = 'holz' | 'glas' | 'weich' | 'orgel';
+export type Klang = 'weich' | 'holz' | 'orgel';
 
 export const KLAENGE: { id: Klang; name: string }[] = [
-  { id: 'holz', name: 'Holz' },
-  { id: 'glas', name: 'Glas' },
   { id: 'weich', name: 'Weich' },
+  { id: 'holz', name: 'Holz' },
   { id: 'orgel', name: 'Orgel' },
 ];
 
-// Obertöne des Dauertons (Index = Harmonische)
-const DRONE: Record<Klang, { harm: number[]; gain: number }> = {
-  holz: { harm: [0, 1], gain: 0.2 },
-  glas: { harm: [0, 1, 0.12, 0, 0.06], gain: 0.19 },
-  weich: { harm: [0, 1, 0, 0.11, 0, 0.04], gain: 0.2 },
-  orgel: { harm: [0, 1, 0.55, 0.35, 0.22, 0, 0.12, 0, 0.08], gain: 0.13 },
-};
+interface Partial {
+  mult: number; // Frequenzfaktor
+  level: number;
+  rel: number; // Abklingzeit relativ zur Grunddauer
+  harmonic: boolean; // unharmonische Teiltöne verschwinden im gehaltenen Ton
+}
 
-// Anschlag: [Frequenzfaktor, Pegel, Abklingzeit relativ zur Grunddauer]
-const HIT: Record<Klang, { partials: [number, number, number][]; dur: (f: number) => number; attack: number; click: number }> = {
-  holz: { partials: [[1, 0.7, 1], [3.93, 0.22, 0.22], [9.2, 0.05, 0.08]], dur: (f) => clamp(90 / f, 0.18, 0.9), attack: 0.003, click: 0.12 },
-  glas: { partials: [[1, 0.55, 1], [2.76, 0.26, 0.6], [5.4, 0.12, 0.35], [8.93, 0.06, 0.2]], dur: () => 1.5, attack: 0.002, click: 0.03 },
-  weich: { partials: [[1, 0.75, 1], [2, 0.12, 0.5], [3, 0.05, 0.3]], dur: (f) => clamp(160 / f, 0.35, 1.1), attack: 0.014, click: 0 },
-  orgel: { partials: [[1, 0.5, 1], [2, 0.28, 1], [3, 0.18, 0.9], [4, 0.1, 0.8]], dur: () => 0.32, attack: 0.008, click: 0 },
-};
+interface Spec {
+  partials: Partial[];
+  dur: (f: number) => number; // Abklingen bis −80 dB bei einem einzelnen Schlag
+  attack: number;
+  click: number;
+}
 
-const REF_HZ = 220;
-
+const p = (mult: number, level: number, rel: number, harmonic = true): Partial => ({ mult, level, rel, harmonic });
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+const SPECS: Record<Klang, Spec> = {
+  weich: { partials: [p(1, 0.75, 1), p(2, 0.12, 0.5), p(3, 0.05, 0.3)], dur: (f) => clamp(160 / f, 0.35, 1.1), attack: 0.014, click: 0 },
+  holz: { partials: [p(1, 0.7, 1), p(3.93, 0.22, 0.22, false), p(9.2, 0.05, 0.08, false)], dur: (f) => clamp(90 / f, 0.18, 0.9), attack: 0.003, click: 0.12 },
+  orgel: { partials: [p(1, 0.5, 1), p(2, 0.28, 1), p(3, 0.18, 0.9), p(4, 0.1, 0.8)], dur: () => 0.32, attack: 0.008, click: 0 },
+};
+
+// Übergang Einzelschläge → gehaltener Ton (Schläge pro Sekunde, logarithmisch)
+const SUSTAIN_FROM = 8;
+const SUSTAIN_TO = 70;
+
+/** 0 = einzelne Schläge, 1 = gehaltener Ton */
+export function sustainAmount(rate: number) {
+  if (rate <= SUSTAIN_FROM) return 0;
+  const t = clamp(Math.log(rate / SUSTAIN_FROM) / Math.log(SUSTAIN_TO / SUSTAIN_FROM), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+const LEVEL_STRIKE = 0.5;
+const LEVEL_HOLD = 0.24;
+
+class Voice {
+  private oscs: OscillatorNode[] = [];
+  private envs: GainNode[] = [];
+  readonly out: GainNode;
+  private freq = 220;
+  private spec: Spec = SPECS.weich;
+  held = false;
+
+  constructor(
+    private ctx: AudioContext,
+    dest: AudioNode,
+    pan: number,
+  ) {
+    const panner = ctx.createStereoPanner();
+    panner.pan.value = pan;
+    this.out = ctx.createGain();
+    this.out.connect(panner).connect(dest);
+  }
+
+  setSpec(spec: Spec) {
+    const t = this.ctx.currentTime;
+    for (const o of this.oscs) o.stop(t + 0.05);
+    for (const e of this.envs) e.gain.setTargetAtTime(0, t, 0.01);
+    this.spec = spec;
+    this.oscs = [];
+    this.envs = [];
+    for (const part of spec.partials) {
+      const o = this.ctx.createOscillator();
+      o.frequency.value = Math.min(this.freq * part.mult, 18000);
+      const e = this.ctx.createGain();
+      e.gain.value = 0;
+      o.connect(e).connect(this.out);
+      o.start();
+      this.oscs.push(o);
+      this.envs.push(e);
+    }
+    this.held = false;
+  }
+
+  setFreq(f: number) {
+    this.freq = f;
+    const t = this.ctx.currentTime;
+    this.spec.partials.forEach((part, i) => this.oscs[i].frequency.setTargetAtTime(Math.min(f * part.mult, 18000), t, 0.015));
+  }
+
+  private peak(part: Partial, s: number) {
+    const level = LEVEL_STRIKE + (LEVEL_HOLD - LEVEL_STRIKE) * s;
+    return part.level * level * (part.harmonic ? 1 : 1 - s);
+  }
+
+  /** Anschlag zur Zeit t; rate = Schläge pro Sekunde dieser Stimme */
+  strike(t: number, rate: number) {
+    const s = sustainAmount(rate);
+    const gap = 1 / Math.max(rate, 1e-3);
+    const { spec } = this;
+    if (this.held) {
+      for (const e of this.envs) e.gain.cancelScheduledValues(t);
+      this.held = false;
+    }
+    const base = spec.dur(this.freq);
+    spec.partials.forEach((part, i) => {
+      const natural = (base * part.rel) / 9.2; // Zeitkonstante für −80 dB nach „dur"
+      const tau = Math.max(natural, gap * 25 * s);
+      const g = this.envs[i].gain;
+      g.setTargetAtTime(this.peak(part, s), t, spec.attack / 3);
+      g.setTargetAtTime(0, t + spec.attack, tau);
+    });
+    if (spec.click > 0 && s < 0.5) this.click(t, spec.click * (1 - 2 * s));
+  }
+
+  /** gehaltener Ton (Form-Modus, sehr schnelles Tempo) */
+  hold() {
+    if (this.held) return;
+    const t = this.ctx.currentTime;
+    this.spec.partials.forEach((part, i) => {
+      const g = this.envs[i].gain;
+      g.cancelScheduledValues(t);
+      g.setTargetAtTime(this.peak(part, 1), t, 0.04);
+    });
+    this.held = true;
+  }
+
+  /** ausklingen lassen */
+  release(tau = 0.14) {
+    const t = this.ctx.currentTime;
+    for (const e of this.envs) {
+      e.gain.cancelScheduledValues(t);
+      e.gain.setTargetAtTime(0, t, tau);
+    }
+    this.held = false;
+  }
+
+  private click(t: number, level: number) {
+    const ctx = this.ctx;
+    const len = Math.floor(ctx.sampleRate * 0.012);
+    const nb = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = nb.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
+    const n = ctx.createBufferSource();
+    n.buffer = nb;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = Math.min(this.freq * 2.5, 8000);
+    bp.Q.value = 1.2;
+    const ng = ctx.createGain();
+    ng.gain.value = level * 0.55;
+    n.connect(bp).connect(ng).connect(this.out);
+    n.start(t);
+  }
+}
 
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private master!: GainNode;
-  private oscA!: OscillatorNode;
-  private oscB!: OscillatorNode;
-  private gainA!: GainNode;
-  private gainB!: GainNode;
-  private drone!: GainNode;
   private echoSend!: GainNode;
-  private level = 0;
-  private soloA = false;
+  private voices: Voice[] = [];
   private fa = 220;
   private fb = 330;
-  private klang: Klang = 'holz';
-  private axisBus: GainNode[] = [];
-  private hitBuf = new Map<Klang, AudioBuffer>();
+  private klang: Klang = 'weich';
   private volume = 0.8;
+  private solo = false;
 
   /** Muss aus einer Nutzergeste heraus aufgerufen werden (iOS). */
   unlock() {
@@ -57,6 +180,10 @@ export class AudioEngine {
 
   get ready() {
     return !!this.ctx && this.ctx.state === 'running';
+  }
+
+  get now() {
+    return this.ctx ? this.ctx.currentTime : 0;
   }
 
   private build() {
@@ -83,7 +210,7 @@ export class AudioEngine {
     verb.connect(wet);
     wet.connect(comp);
 
-    // Echo nur fürs Ausklingen: Send ist normalerweise zu
+    // Echo nur fürs Ausklingen beim Pausieren: Send ist normalerweise zu
     const delay = ctx.createDelay(1);
     delay.delayTime.value = 0.23;
     const fb = ctx.createGain();
@@ -97,36 +224,13 @@ export class AudioEngine {
     delay.connect(lp).connect(fb).connect(delay);
     lp.connect(this.master);
 
-    this.drone = ctx.createGain();
-    this.drone.gain.value = 0;
-    this.drone.connect(this.master);
-    this.drone.connect(this.echoSend);
-
-    const voice = (freq: number, pan: number) => {
-      const osc = ctx.createOscillator();
-      osc.frequency.value = freq;
-      const g = ctx.createGain();
-      const p = ctx.createStereoPanner();
-      p.pan.value = pan;
-      osc.connect(g).connect(p).connect(this.drone);
-      osc.start();
-      return { osc, g };
-    };
-    const va = voice(this.fa, -0.25);
-    const vb = voice(this.fb, 0.25);
-    this.oscA = va.osc;
-    this.gainA = va.g;
-    this.oscB = vb.osc;
-    this.gainB = vb.g;
-
-    for (const pan of [-0.35, 0.35]) {
-      const g = ctx.createGain();
-      const p = ctx.createStereoPanner();
-      p.pan.value = pan;
-      g.connect(p).connect(this.master);
-      this.axisBus.push(g);
-    }
-    this.applyKlang();
+    const bus = ctx.createGain();
+    bus.connect(this.master);
+    bus.connect(this.echoSend);
+    this.voices = [new Voice(ctx, bus, -0.3), new Voice(ctx, bus, 0.3)];
+    for (const v of this.voices) v.setSpec(SPECS[this.klang]);
+    this.voices[0].setFreq(this.fa);
+    this.voices[1].setFreq(this.fb);
   }
 
   private impulse(seconds: number) {
@@ -140,26 +244,9 @@ export class AudioEngine {
     return buf;
   }
 
-  private wave(harm: number[]) {
-    const real = new Float32Array(harm.length);
-    const imag = Float32Array.from(harm);
-    return this.ctx!.createPeriodicWave(real, imag);
-  }
-
-  private applyKlang() {
-    if (!this.ctx) return;
-    const d = DRONE[this.klang];
-    const w = this.wave(d.harm);
-    this.oscA.setPeriodicWave(w);
-    this.oscB.setPeriodicWave(w);
-    const t = this.ctx.currentTime;
-    this.gainA.gain.setTargetAtTime(d.gain, t, 0.05);
-    this.gainB.gain.setTargetAtTime(this.soloA ? 0 : d.gain, t, 0.05);
-  }
-
   setKlang(k: Klang) {
     this.klang = k;
-    this.applyKlang();
+    for (const v of this.voices) v.setSpec(SPECS[k]);
   }
 
   setVolume(v: number) {
@@ -172,142 +259,39 @@ export class AudioEngine {
     this.fa = fa;
     this.fb = Math.min(fb, 12000);
     if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    this.oscA.frequency.setTargetAtTime(this.fa, t, 0.015);
-    this.oscB.frequency.setTargetAtTime(this.fb, t, 0.015);
+    this.voices[0].setFreq(this.fa);
+    this.voices[1].setFreq(this.fb);
   }
 
-  /** Dauerton-Pegel 0..1; soloA = nur Grundton (beim Halten des Grundton-Reglers). */
-  setDrone(level: number, soloA: boolean) {
-    if (!this.ctx) return;
-    const t = this.ctx.currentTime;
-    if (Math.abs(level - this.level) > 0.01 || (level === 0 && this.level !== 0)) {
-      this.drone.gain.setTargetAtTime(level * 0.9, t, level > this.level ? 0.04 : 0.1);
-      this.level = level;
-    }
-    if (soloA !== this.soloA) {
-      this.soloA = soloA;
-      this.gainB.gain.setTargetAtTime(soloA ? 0 : DRONE[this.klang].gain, t, 0.05);
-    }
+  /** nur Ton A hörbar (beim Halten des Grundton-Reglers) */
+  setSolo(on: boolean) {
+    if (!this.ctx || on === this.solo) return;
+    this.solo = on;
+    this.voices[1].out.gain.setTargetAtTime(on ? 0 : 1, this.ctx.currentTime, 0.05);
   }
 
-  /** Pause: Dauerton sanft ausklingen lassen, mit kurzem Echo */
+  hold(axis: 0 | 1) {
+    if (this.ready) this.voices[axis].hold();
+  }
+
+  strike(axis: 0 | 1, when: number, rate: number) {
+    if (!this.ready) return;
+    this.voices[axis].strike(Math.max(when, this.ctx!.currentTime), rate);
+  }
+
+  /** Pause: sanft ausklingen lassen, mit kurzem Echo */
   release() {
     if (!this.ctx) return;
     const t = this.ctx.currentTime;
-    this.drone.gain.cancelScheduledValues(t);
-    this.drone.gain.setTargetAtTime(0, t, 0.14);
-    this.level = 0;
+    for (const v of this.voices) v.release(0.14);
     this.echoSend.gain.cancelScheduledValues(t);
     this.echoSend.gain.setValueAtTime(0.6, t);
     this.echoSend.gain.setTargetAtTime(0, t + 0.5, 0.15);
   }
 
-  get now() {
-    return this.ctx ? this.ctx.currentTime : 0;
-  }
-
-  /** Anschlag einmal bei REF_HZ vorrechnen; gespielt wird per playbackRate */
-  private buffer(): AudioBuffer {
-    const cached = this.hitBuf.get(this.klang);
-    if (cached) return cached;
-    const ctx = this.ctx!;
-    const spec = HIT[this.klang];
-    const f = REF_HZ;
-    const dur = spec.dur(f);
-    const len = Math.ceil(ctx.sampleRate * (spec.attack + dur + 0.02));
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
-    const d = buf.getChannelData(0);
-    const sr = ctx.sampleRate;
-    for (const [mult, level, rel] of spec.partials) {
-      const w = (2 * Math.PI * f * mult) / sr;
-      const tau = (dur * rel) / 9.2; // exponentialRamp auf 0,0001 ≈ e^−9,2
-      for (let i = 0; i < len; i++) {
-        const t = i / sr;
-        const env = t < spec.attack ? t / spec.attack : Math.exp(-(t - spec.attack) / tau);
-        d[i] += level * env * Math.sin(w * i);
-      }
-    }
-    if (spec.click > 0) {
-      const n = Math.floor(sr * 0.012);
-      let lp = 0;
-      for (let i = 0; i < n; i++) {
-        lp += 0.35 * ((Math.random() * 2 - 1) - lp);
-        d[i] += spec.click * lp * (1 - i / n);
-      }
-    }
-    for (let i = 0; i < len; i++) d[i] *= 0.55;
-    this.hitBuf.set(this.klang, buf);
-    return buf;
-  }
-
-  /** Länge eines Anschlags in Sekunden bei dieser Tonhöhe */
-  hitDuration(freq: number) {
-    return this.ready ? this.buffer().duration * (REF_HZ / freq) : 0.4;
-  }
-
-  /** sample-genau geplanter Anschlag (Achse 0 = A, 1 = B) */
-  schedule(axis: 0 | 1, freq: number, when: number) {
-    if (!this.ready) return;
-    const src = this.ctx!.createBufferSource();
-    src.buffer = this.buffer();
-    src.playbackRate.value = Math.min(freq, 6000) / REF_HZ;
-    src.connect(this.axisBus[axis]);
-    src.start(Math.max(when, this.ctx!.currentTime));
-  }
-
-  /** Pegel je Achse, gleicht die Überlagerung vieler Anschläge aus */
-  setAxisGain(axis: 0 | 1, g: number) {
-    if (!this.ready) return;
-    this.axisBus[axis].gain.setTargetAtTime(g, this.ctx!.currentTime, 0.05);
-  }
-
-  /** kurzer Anschlag in der Tonhöhe des jeweiligen Tons */
-  hit(freq: number, pan: number, velocity = 1) {
-    if (!this.ready || velocity <= 0.002) return;
-    const ctx = this.ctx!;
-    const t = ctx.currentTime + 0.005;
-    const f = Math.min(freq, 6000);
-    const spec = HIT[this.klang];
-    const dur = spec.dur(f);
-
-    const out = ctx.createGain();
-    out.gain.value = 0.55 * velocity;
-    const p = ctx.createStereoPanner();
-    p.pan.value = pan;
-    out.connect(p).connect(this.master);
-
-    for (const [mult, level, rel] of spec.partials) {
-      const pf = f * mult;
-      if (pf > 16000) continue;
-      const dec = dur * rel;
-      const o = ctx.createOscillator();
-      o.type = 'sine';
-      o.frequency.value = pf;
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(level, t + spec.attack);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + spec.attack + dec);
-      o.connect(g).connect(out);
-      o.start(t);
-      o.stop(t + spec.attack + dec + 0.05);
-    }
-
-    if (spec.click > 0) {
-      const len = Math.floor(ctx.sampleRate * 0.012);
-      const nb = ctx.createBuffer(1, len, ctx.sampleRate);
-      const d = nb.getChannelData(0);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / len);
-      const n = ctx.createBufferSource();
-      n.buffer = nb;
-      const bp = ctx.createBiquadFilter();
-      bp.type = 'bandpass';
-      bp.frequency.value = Math.min(f * 2.5, 8000);
-      bp.Q.value = 1.2;
-      const ng = ctx.createGain();
-      ng.gain.value = spec.click;
-      n.connect(bp).connect(ng).connect(out);
-      n.start(t);
-    }
+  /** leise ohne Echo (Moduswechsel, Grundton losgelassen) */
+  quiet(axis?: 0 | 1) {
+    if (!this.ctx) return;
+    this.voices.forEach((v, i) => (axis === undefined || axis === i) && v.release(0.08));
   }
 }

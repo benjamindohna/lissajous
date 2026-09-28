@@ -640,7 +640,3 @@ body.zen .setbtn {
 body.trail-keep .tail-only {
   display: none;
 }
-.fast-row .seg {
-  grid-column: 2 / 4;
-  justify-self: start;
-}

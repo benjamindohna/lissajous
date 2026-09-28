@@ -1,7 +1,7 @@
 import './style.css';
 import { Stage, AXIS, MAX_POINTS } from './stage';
 import { SpringCurve, pts, cols, PALETTE, paletteIndex, intensity, wobble, hash, setPalette, stepPalette, TAU } from './figure';
-import { AudioEngine, KLAENGE, type Klang } from './audio';
+import { AudioEngine, KLAENGE, sustainAmount, type Klang } from './audio';
 import { PRESETS, MAX_TERM, reduce, intervalName, formatNote, approximate, cents } from './ratio';
 import { THEMES, hexToRgb, type Theme } from './themes';
 
@@ -23,9 +23,8 @@ const state = {
   tail: 1.5, // Sekunden
   zen: false,
   theme: 'aurora',
-  klang: 'holz' as Klang,
+  klang: 'weich' as Klang,
   volume: 0.8,
-  fast: 'pur' as 'pur' | 'mix', // hohes Tempo: nur Anschläge oder Übergang in Dauerton
 };
 
 // Figur: a× A gegen b× B, delta = Rest bei freien Verhältnissen
@@ -38,12 +37,6 @@ const TEMPO_MIN = 0.08;
 const DISSOLVE_S = 0.9; // radioaktives Verschwinden/Erscheinen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
 const HIT_FADE: [number, number] = [4, 14]; // Hz: Achsenmarkierungen hören auf zu blitzen
-// Anschläge werden von 4 Hz bis Echtzeit gleichmäßig (logarithmisch) leiser, bis −26 dB,
-// der Dauerton blendet über einen weiten Bereich ein – beide überlappen lange
-const HIT_FROM = 4;
-const HIT_FLOOR_DB = -26;
-const DRONE_FADE: [number, number] = [5, 90];
-const HIT_MAX_RATE = 30; // Anschläge pro Sekunde und Achse, darüber wird ausgedünnt
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number, d = 1) => v.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: 0 });
@@ -98,8 +91,6 @@ let rNow = state.r; // gleitet zum Ziel state.r
 // Form-Modus: aufgelaufene Drift freier Verhältnisse
 let psi = 0;
 let flashX = 0;
-let lastHitA = 0;
-let lastHitB = 0;
 let schedA = 0; // bis hierhin sind Anschläge im Audio-Takt geplant
 let schedB = 0;
 let flashY = 0;
@@ -247,6 +238,7 @@ function setMode(m: Mode) {
   stage.setDrawDecor(m === 'draw');
   thStart = thA;
   lastThB = rNow * thA + off;
+  if (m === 'draw') audio.quiet();
   updateTexts();
   requestAnimationFrame(layout);
 }
@@ -447,7 +439,9 @@ baseSlider.addEventListener('pointerdown', () => {
   holdingBase = true;
 });
 const release = () => {
+  if (!holdingBase) return;
   holdingBase = false;
+  if (!(state.playing && state.mode === 'form')) audio.quiet(0);
 };
 window.addEventListener('pointerup', release);
 window.addEventListener('pointercancel', release);
@@ -484,14 +478,6 @@ document.querySelectorAll<HTMLButtonElement>('#trailSeg button').forEach((b) =>
   }),
 );
 
-document.querySelectorAll<HTMLButtonElement>('#fastSeg button').forEach((b) =>
-  b.addEventListener('click', () => {
-    state.fast = b.dataset.fast as 'pur' | 'mix';
-    document.querySelectorAll<HTMLButtonElement>('#fastSeg button').forEach((x) => x.classList.toggle('on', x === b));
-    store.set('fast', state.fast);
-  }),
-);
-if (store.get('fast') === 'mix') (document.querySelector('#fastSeg [data-fast=mix]') as HTMLButtonElement).click();
 
 $('restartBtn').addEventListener('click', () => {
   thStart = thA;
@@ -530,31 +516,33 @@ window.addEventListener('resize', layout);
 const LOOKAHEAD = 0.12;
 
 /**
- * Nur-Anschläge-Modus: Nulldurchgänge für die nächsten ~120 ms vorausberechnen
- * und sample-genau planen. So bleibt jeder Schlag gleich lang, auch bei
- * hunderten pro Sekunde – nur das Tempo ändert sich.
+ * Nulldurchgänge der nächsten ~120 ms vorausberechnen und sample-genau als
+ * Anschläge planen. Sind die Schläge so dicht, dass die Stimme ohnehin nicht
+ * mehr abklingt, wird sie einfach gehalten.
  */
 function scheduleHits(tempoEff: number, thB: number) {
   if (!audio.ready) return;
   const tNow = audio.now;
   const horizon = tNow + LOOKAHEAD;
   const wA = TAU * tempoEff;
-  const axes: [0 | 1, number, number, number][] = [
-    [0, thA, wA, state.base],
-    [1, thB, wA * rNow, freqB()],
+  const axes: [0 | 1, number, number][] = [
+    [0, thA, wA],
+    [1, thB, wA * rNow],
   ];
-  for (const [axis, th, w, freq] of axes) {
+  for (const [axis, th, w] of axes) {
     let from = axis === 0 ? schedA : schedB;
     if (from < tNow) from = tNow;
-    if (w > 1e-4) {
-      // Überlagerung vieler gleich langer Anschläge ausgleichen
-      const overlap = (w / Math.PI) * audio.hitDuration(freq);
-      audio.setAxisGain(axis, (axis === 0 ? 1 : 0.9) / Math.pow(1 + overlap * 0.35, 0.9));
+    const rate = w / Math.PI; // zwei Nulldurchgänge pro Schwingung
+    if (axis === 0 && holdingBase) {
+      // Grundton wird gerade gehalten
+    } else if (sustainAmount(rate) > 0.995) {
+      audio.hold(axis);
+    } else if (w > 1e-4) {
       let k = Math.floor((th + w * (from - tNow)) / Math.PI) + 1;
-      for (let guard = 0; guard < 600; guard++, k++) {
+      for (let guard = 0; guard < 200; guard++, k++) {
         const t = tNow + (k * Math.PI - th) / w;
         if (t > horizon) break;
-        if (t >= from) audio.schedule(axis, freq, t);
+        if (t >= from) audio.strike(axis, t, rate);
       }
     }
     if (axis === 0) schedA = horizon;
@@ -590,7 +578,6 @@ function frame(now: number) {
   const phase = state.phase;
   const amp = state.wobble * 0.035;
   const I = intensity(a, b);
-  let droneLevel = 0;
   let bloomBoost = 0;
 
   if (state.mode === 'form') {
@@ -600,7 +587,6 @@ function frame(now: number) {
       refreshTargets();
     }
     spring.step(dt);
-    droneLevel = state.playing ? 1 : 0;
 
     const n = spring.n;
     if (presence <= 0) {
@@ -654,30 +640,11 @@ function frame(now: number) {
     }
     const thB = rNow * thA + off;
 
-    // Anschläge bei langsamem Tempo, Dauerton bei schnellem, mit langer Überlappung
-    const x = Math.min(1, Math.max(0, Math.log(tempoEff / HIT_FROM) / Math.log(state.base / HIT_FROM)));
-    const hitLevel = tempoEff <= HIT_FROM ? 1 : Math.pow(10, (HIT_FLOOR_DB * x) / 20);
+    // Anschläge im Audio-Takt; die Markierungen blitzen nur bei langsamem Tempo
     const flashLevel = 1 - smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff);
-    const pure = state.fast === 'pur';
-    droneLevel = pure ? 0 : smoothstep(Math.log(DRONE_FADE[0]), Math.log(DRONE_FADE[1]), Math.log(Math.max(tempoEff, 1e-3))) * speed;
-    if (pure) {
-      scheduleHits(tempoEff, thB);
-      flashX = Math.max(flashX, Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI) ? flashLevel : 0);
-      flashY = Math.max(flashY, Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI) ? flashLevel : 0);
-    } else if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) {
-      flashX = Math.max(flashX, flashLevel);
-      if (time - lastHitA >= 1 / HIT_MAX_RATE) {
-        lastHitA = time;
-        audio.hit(state.base, -0.35, hitLevel);
-      }
-    }
-    if (!pure && Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) {
-      flashY = Math.max(flashY, flashLevel);
-      if (time - lastHitB >= 1 / HIT_MAX_RATE) {
-        lastHitB = time;
-        audio.hit(freqB(), 0.35, 0.9 * hitLevel);
-      }
-    }
+    if (state.playing) scheduleHits(tempoEff, thB);
+    if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) flashX = Math.max(flashX, flashLevel);
+    if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, flashLevel);
     lastThB = thB;
 
     // Spur analytisch aus der aktuellen Bewegung – ändert sich live beim Ziehen
@@ -718,8 +685,12 @@ function frame(now: number) {
   stage.bloom.strength = 0.75 + bloomBoost + state.wobble * 0.18 * Math.sin(time * 2.3) * Math.sin(time * 0.7 + 1);
 
   audio.setFreqs(state.base, freqB());
-  if (holdingBase) audio.setDrone(1, true);
-  else if (state.playing || droneLevel === 0) audio.setDrone(droneLevel, false);
+  audio.setSolo(holdingBase);
+  if (holdingBase) audio.hold(0);
+  if (state.playing && state.mode === 'form') {
+    audio.hold(0);
+    audio.hold(1);
+  }
   playBtn.classList.toggle('wait', state.playing && !audio.ready);
 
   stage.render(dt);
@@ -732,7 +703,7 @@ function frame(now: number) {
 const savedTheme = THEMES.find((t) => t.id === store.get('theme')) ?? THEMES[0];
 applyTheme(savedTheme, true);
 const savedKlang = store.get('klang') as Klang | null;
-applyKlang(KLAENGE.some((k) => k.id === savedKlang) ? savedKlang! : 'holz');
+applyKlang(KLAENGE.some((k) => k.id === savedKlang) ? savedKlang! : 'weich');
 const savedVol = store.get('volume');
 if (savedVol !== null && !Number.isNaN(+savedVol)) state.volume = Math.min(1, Math.max(0, +savedVol));
 audio.setVolume(state.volume);
