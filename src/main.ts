@@ -36,7 +36,13 @@ const DRIFT_HZ = 8; // Drehgeschwindigkeit freier Verhältnisse im Form-Modus
 const TEMPO_MIN = 0.08;
 const DISSOLVE_S = 0.9; // radioaktives Verschwinden/Erscheinen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
-const HIT_FADE: [number, number] = [4, 14]; // Hz: Anschläge → Dauerton
+const HIT_FADE: [number, number] = [4, 14]; // Hz: Achsenmarkierungen hören auf zu blitzen
+// Anschläge werden von 4 Hz bis Echtzeit gleichmäßig (logarithmisch) leiser, bis −26 dB,
+// der Dauerton blendet über einen weiten Bereich ein – beide überlappen lange
+const HIT_FROM = 4;
+const HIT_FLOOR_DB = -26;
+const DRONE_FADE: [number, number] = [5, 90];
+const HIT_MAX_RATE = 30; // Anschläge pro Sekunde und Achse, darüber wird ausgedünnt
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number, d = 1) => v.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: 0 });
@@ -91,6 +97,8 @@ let rNow = state.r; // gleitet zum Ziel state.r
 // Form-Modus: aufgelaufene Drift freier Verhältnisse
 let psi = 0;
 let flashX = 0;
+let lastHitA = 0;
+let lastHitB = 0;
 let flashY = 0;
 let holdingBase = false;
 let time = 0;
@@ -597,16 +605,24 @@ function frame(now: number) {
     }
     const thB = rNow * thA + off;
 
-    // Anschläge bei langsamem Tempo, Dauerton bei schnellem
-    const hitLevel = 1 - smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff);
-    droneLevel = smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff) * speed;
+    // Anschläge bei langsamem Tempo, Dauerton bei schnellem, mit langer Überlappung
+    const x = Math.min(1, Math.max(0, Math.log(tempoEff / HIT_FROM) / Math.log(state.base / HIT_FROM)));
+    const hitLevel = tempoEff <= HIT_FROM ? 1 : Math.pow(10, (HIT_FLOOR_DB * x) / 20);
+    const flashLevel = 1 - smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff);
+    droneLevel = smoothstep(Math.log(DRONE_FADE[0]), Math.log(DRONE_FADE[1]), Math.log(Math.max(tempoEff, 1e-3))) * speed;
     if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) {
-      flashX = Math.max(flashX, hitLevel);
-      audio.hit(state.base, -0.35, hitLevel);
+      flashX = Math.max(flashX, flashLevel);
+      if (time - lastHitA >= 1 / HIT_MAX_RATE) {
+        lastHitA = time;
+        audio.hit(state.base, -0.35, hitLevel);
+      }
     }
     if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) {
-      flashY = Math.max(flashY, hitLevel);
-      audio.hit(freqB(), 0.35, 0.9 * hitLevel);
+      flashY = Math.max(flashY, flashLevel);
+      if (time - lastHitB >= 1 / HIT_MAX_RATE) {
+        lastHitB = time;
+        audio.hit(freqB(), 0.35, 0.9 * hitLevel);
+      }
     }
     lastThB = thB;
 

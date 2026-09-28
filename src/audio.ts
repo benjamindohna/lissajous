@@ -193,7 +193,7 @@ export class AudioEngine {
 
   /** kurzer Anschlag in der Tonhöhe des jeweiligen Tons */
   hit(freq: number, pan: number, velocity = 1) {
-    if (!this.ready || velocity <= 0.01) return;
+    if (!this.ready || velocity <= 0.002) return;
     const ctx = this.ctx!;
     const t = ctx.currentTime + 0.005;
     const f = Math.min(freq, 6000);
