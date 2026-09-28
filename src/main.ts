@@ -35,6 +35,9 @@ const NEAR_CENTS = 45; // bis hier „fast Quinte"
 const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
+// Phasenführung beim Ziehen: aus unter 45 % sichtbarer Figur, voll ab 90 %
+const GUIDE_FROM = 0.45;
+const GUIDE_TO = 0.9;
 const HEAD_FADE: [number, number] = [2.5, 8]; // Hz: Kopf/Blitzen → ruhige Form (vor dem Stroboskop-Effekt)
 const GLIMMER: [number, number] = [8, 20]; // Hz: leichtes Glimmen/Flimmern der ruhigen Form
 
@@ -576,6 +579,8 @@ function scheduleHits(tempoEff: number, thB: number) {
  * Läuft das Verhältnis auf ein Intervall zu, wird die Phasenabweichung um genau
  * den Anteil verkleinert, um den der Abstand (in Cent) geschrumpft ist. Beim
  * Ankommen ist sie null – die Form ist sofort perfekt, ohne Nachjustieren.
+ * Das gilt nur, soweit man die Figur sehen kann (figureVisibility): Sieht man
+ * nur einen Punkt mit Schweif, bleibt die Phase unangetastet.
  */
 function guidePhase(rFrom: number, rTo: number) {
   if (rFrom === rTo) return;
@@ -587,7 +592,24 @@ function guidePhase(rFrom: number, rTo: number) {
   const dFrom = Math.abs(cents(rFrom) - goal);
   const dTo = Math.abs(cents(rTo) - goal);
   if (!(dTo < dFrom)) return; // entfernt sich: nichts tun
-  off -= phaseError(a) * (1 - dTo / dFrom);
+  // nur so stark, wie man die Zielfigur überhaupt sehen kann
+  const g = smoothstep(GUIDE_FROM, GUIDE_TO, figureVisibility(a));
+  if (g > 0) off -= phaseError(a) * (1 - dTo / dFrom) * g;
+}
+
+/**
+ * Wie viel einer a:b-Figur gerade zu sehen ist (0..1). Die Figur ist nach a
+ * Schwingungen von A vollständig. Bleibt: was schon gezeichnet ist. Schweif:
+ * Tempo × Schweiflänge; langsam zählt nur der hellere vordere Teil (~58 %),
+ * schnell leuchtet die Spur gleichmäßig und zählt ganz.
+ */
+function figureVisibility(a: number) {
+  const cycles = a;
+  if (state.trail === 'keep') return Math.min(1, (thA - thStart) / (TAU * cycles));
+  const lt = Math.log(Math.max(state.tempo, 1e-3));
+  const even = smoothstep(Math.log(HEAD_FADE[0]), Math.log(HEAD_FADE[1]), lt);
+  const readable = state.tempo * state.tail * (0.58 + 0.42 * even);
+  return Math.min(1, readable / cycles);
 }
 
 /* ---------- Schleife ---------- */
@@ -749,4 +771,4 @@ updateTexts();
 layout();
 requestAnimationFrame(frame);
 
-if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
+if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), visibility: figureVisibility, phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
