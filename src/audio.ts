@@ -27,6 +27,8 @@ const HIT: Record<Klang, { partials: [number, number, number][]; dur: (f: number
   orgel: { partials: [[1, 0.5, 1], [2, 0.28, 1], [3, 0.18, 0.9], [4, 0.1, 0.8]], dur: () => 0.32, attack: 0.008, click: 0 },
 };
 
+const REF_HZ = 220;
+
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 export class AudioEngine {
@@ -43,6 +45,8 @@ export class AudioEngine {
   private fa = 220;
   private fb = 330;
   private klang: Klang = 'holz';
+  private axisBus: GainNode[] = [];
+  private hitBuf = new Map<Klang, AudioBuffer>();
   private volume = 0.8;
 
   /** Muss aus einer Nutzergeste heraus aufgerufen werden (iOS). */
@@ -114,6 +118,14 @@ export class AudioEngine {
     this.gainA = va.g;
     this.oscB = vb.osc;
     this.gainB = vb.g;
+
+    for (const pan of [-0.35, 0.35]) {
+      const g = ctx.createGain();
+      const p = ctx.createStereoPanner();
+      p.pan.value = pan;
+      g.connect(p).connect(this.master);
+      this.axisBus.push(g);
+    }
     this.applyKlang();
   }
 
@@ -189,6 +201,65 @@ export class AudioEngine {
     this.echoSend.gain.cancelScheduledValues(t);
     this.echoSend.gain.setValueAtTime(0.6, t);
     this.echoSend.gain.setTargetAtTime(0, t + 0.5, 0.15);
+  }
+
+  get now() {
+    return this.ctx ? this.ctx.currentTime : 0;
+  }
+
+  /** Anschlag einmal bei REF_HZ vorrechnen; gespielt wird per playbackRate */
+  private buffer(): AudioBuffer {
+    const cached = this.hitBuf.get(this.klang);
+    if (cached) return cached;
+    const ctx = this.ctx!;
+    const spec = HIT[this.klang];
+    const f = REF_HZ;
+    const dur = spec.dur(f);
+    const len = Math.ceil(ctx.sampleRate * (spec.attack + dur + 0.02));
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    const sr = ctx.sampleRate;
+    for (const [mult, level, rel] of spec.partials) {
+      const w = (2 * Math.PI * f * mult) / sr;
+      const tau = (dur * rel) / 9.2; // exponentialRamp auf 0,0001 ≈ e^−9,2
+      for (let i = 0; i < len; i++) {
+        const t = i / sr;
+        const env = t < spec.attack ? t / spec.attack : Math.exp(-(t - spec.attack) / tau);
+        d[i] += level * env * Math.sin(w * i);
+      }
+    }
+    if (spec.click > 0) {
+      const n = Math.floor(sr * 0.012);
+      let lp = 0;
+      for (let i = 0; i < n; i++) {
+        lp += 0.35 * ((Math.random() * 2 - 1) - lp);
+        d[i] += spec.click * lp * (1 - i / n);
+      }
+    }
+    for (let i = 0; i < len; i++) d[i] *= 0.55;
+    this.hitBuf.set(this.klang, buf);
+    return buf;
+  }
+
+  /** Länge eines Anschlags in Sekunden bei dieser Tonhöhe */
+  hitDuration(freq: number) {
+    return this.ready ? this.buffer().duration * (REF_HZ / freq) : 0.4;
+  }
+
+  /** sample-genau geplanter Anschlag (Achse 0 = A, 1 = B) */
+  schedule(axis: 0 | 1, freq: number, when: number) {
+    if (!this.ready) return;
+    const src = this.ctx!.createBufferSource();
+    src.buffer = this.buffer();
+    src.playbackRate.value = Math.min(freq, 6000) / REF_HZ;
+    src.connect(this.axisBus[axis]);
+    src.start(Math.max(when, this.ctx!.currentTime));
+  }
+
+  /** Pegel je Achse, gleicht die Überlagerung vieler Anschläge aus */
+  setAxisGain(axis: 0 | 1, g: number) {
+    if (!this.ready) return;
+    this.axisBus[axis].gain.setTargetAtTime(g, this.ctx!.currentTime, 0.05);
   }
 
   /** kurzer Anschlag in der Tonhöhe des jeweiligen Tons */

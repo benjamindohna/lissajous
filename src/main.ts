@@ -25,6 +25,7 @@ const state = {
   theme: 'aurora',
   klang: 'holz' as Klang,
   volume: 0.8,
+  fast: 'pur' as 'pur' | 'mix', // hohes Tempo: nur Anschläge oder Übergang in Dauerton
 };
 
 // Figur: a× A gegen b× B, delta = Rest bei freien Verhältnissen
@@ -99,6 +100,8 @@ let psi = 0;
 let flashX = 0;
 let lastHitA = 0;
 let lastHitB = 0;
+let schedA = 0; // bis hierhin sind Anschläge im Audio-Takt geplant
+let schedB = 0;
 let flashY = 0;
 let holdingBase = false;
 let time = 0;
@@ -481,6 +484,15 @@ document.querySelectorAll<HTMLButtonElement>('#trailSeg button').forEach((b) =>
   }),
 );
 
+document.querySelectorAll<HTMLButtonElement>('#fastSeg button').forEach((b) =>
+  b.addEventListener('click', () => {
+    state.fast = b.dataset.fast as 'pur' | 'mix';
+    document.querySelectorAll<HTMLButtonElement>('#fastSeg button').forEach((x) => x.classList.toggle('on', x === b));
+    store.set('fast', state.fast);
+  }),
+);
+if (store.get('fast') === 'mix') (document.querySelector('#fastSeg [data-fast=mix]') as HTMLButtonElement).click();
+
 $('restartBtn').addEventListener('click', () => {
   thStart = thA;
 });
@@ -512,6 +524,43 @@ window.addEventListener('keydown', (e) => {
 
 new ResizeObserver(layout).observe(panel);
 window.addEventListener('resize', layout);
+
+/* ---------- Anschläge im Audio-Takt ---------- */
+
+const LOOKAHEAD = 0.12;
+
+/**
+ * Nur-Anschläge-Modus: Nulldurchgänge für die nächsten ~120 ms vorausberechnen
+ * und sample-genau planen. So bleibt jeder Schlag gleich lang, auch bei
+ * hunderten pro Sekunde – nur das Tempo ändert sich.
+ */
+function scheduleHits(tempoEff: number, thB: number) {
+  if (!audio.ready) return;
+  const tNow = audio.now;
+  const horizon = tNow + LOOKAHEAD;
+  const wA = TAU * tempoEff;
+  const axes: [0 | 1, number, number, number][] = [
+    [0, thA, wA, state.base],
+    [1, thB, wA * rNow, freqB()],
+  ];
+  for (const [axis, th, w, freq] of axes) {
+    let from = axis === 0 ? schedA : schedB;
+    if (from < tNow) from = tNow;
+    if (w > 1e-4) {
+      // Überlagerung vieler gleich langer Anschläge ausgleichen
+      const overlap = (w / Math.PI) * audio.hitDuration(freq);
+      audio.setAxisGain(axis, (axis === 0 ? 1 : 0.9) / Math.pow(1 + overlap * 0.35, 0.9));
+      let k = Math.floor((th + w * (from - tNow)) / Math.PI) + 1;
+      for (let guard = 0; guard < 600; guard++, k++) {
+        const t = tNow + (k * Math.PI - th) / w;
+        if (t > horizon) break;
+        if (t >= from) audio.schedule(axis, freq, t);
+      }
+    }
+    if (axis === 0) schedA = horizon;
+    else schedB = horizon;
+  }
+}
 
 /* ---------- Schleife ---------- */
 
@@ -609,15 +658,20 @@ function frame(now: number) {
     const x = Math.min(1, Math.max(0, Math.log(tempoEff / HIT_FROM) / Math.log(state.base / HIT_FROM)));
     const hitLevel = tempoEff <= HIT_FROM ? 1 : Math.pow(10, (HIT_FLOOR_DB * x) / 20);
     const flashLevel = 1 - smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff);
-    droneLevel = smoothstep(Math.log(DRONE_FADE[0]), Math.log(DRONE_FADE[1]), Math.log(Math.max(tempoEff, 1e-3))) * speed;
-    if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) {
+    const pure = state.fast === 'pur';
+    droneLevel = pure ? 0 : smoothstep(Math.log(DRONE_FADE[0]), Math.log(DRONE_FADE[1]), Math.log(Math.max(tempoEff, 1e-3))) * speed;
+    if (pure) {
+      scheduleHits(tempoEff, thB);
+      flashX = Math.max(flashX, Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI) ? flashLevel : 0);
+      flashY = Math.max(flashY, Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI) ? flashLevel : 0);
+    } else if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) {
       flashX = Math.max(flashX, flashLevel);
       if (time - lastHitA >= 1 / HIT_MAX_RATE) {
         lastHitA = time;
         audio.hit(state.base, -0.35, hitLevel);
       }
     }
-    if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) {
+    if (!pure && Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) {
       flashY = Math.max(flashY, flashLevel);
       if (time - lastHitB >= 1 / HIT_MAX_RATE) {
         lastHitB = time;
