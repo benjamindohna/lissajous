@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+    <meta name="theme-color" content="#05060a" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <title>Lissajous</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <canvas id="c"></canvas>
+    <div class="vignette"></div>
+
+    <header class="top ui" id="top">
+      <div class="brand">Lissajous</div>
+      <div class="now">
+        <span class="now-name" id="nowName">Quinte</span>
+        <span class="now-ratio" id="nowRatio">2 : 3</span>
+      </div>
+      <div class="now-meta" id="nowMeta"></div>
+    </header>
+
+    <div class="axislabel ui" id="labA"></div>
+    <div class="axislabel ui" id="labB"></div>
+
+    <div class="zenhint" id="zenHint">Tippen zum Einblenden</div>
+
+    <section class="panel ui" id="panel">
+      <div class="row main">
+        <div class="seg" id="modeSeg" role="tablist">
+          <button data-mode="form" class="on">Form</button>
+          <button data-mode="draw">Zeichnen</button>
+        </div>
+        <div class="ratio-wrap">
+          <input id="ratio" value="2:3" autocomplete="off" autocorrect="off" spellcheck="false" aria-label="Verhältnis" />
+        </div>
+        <div class="icons">
+          <button class="icon" id="restartBtn" title="Neu zeichnen" hidden>
+            <svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" /><path d="M3 3v5h5" /></svg>
+          </button>
+          <button class="icon on" id="soundBtn" title="Ton an/aus">
+            <svg class="snd-on" viewBox="0 0 24 24"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z" /><path d="M16 9a5 5 0 0 1 0 6" /><path d="M19.4 18.4a9 9 0 0 0 0-12.8" /></svg>
+            <svg class="snd-off" viewBox="0 0 24 24"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6.4 7.6A1.4 1.4 0 0 1 5.4 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.4a1.4 1.4 0 0 1 1 .4l3.4 3.4a.7.7 0 0 0 1.2-.5z" /><line x1="22" x2="16" y1="9" y2="15" /><line x1="16" x2="22" y1="9" y2="15" /></svg>
+          </button>
+          <button class="icon" id="moreBtn" title="Einstellungen">
+            <svg viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4" /><line x1="10" x2="3" y1="4" y2="4" /><line x1="21" x2="12" y1="12" y2="12" /><line x1="8" x2="3" y1="12" y2="12" /><line x1="21" x2="16" y1="20" y2="20" /><line x1="12" x2="3" y1="20" y2="20" /><line x1="14" x2="14" y1="2" y2="6" /><line x1="8" x2="8" y1="10" y2="14" /><line x1="16" x2="16" y1="18" y2="22" /></svg>
+          </button>
+          <button class="icon" id="zenBtn" title="Nur die Figur (H)">
+            <svg viewBox="0 0 24 24"><polyline points="15 3 21 3 21 9" /><polyline points="9 21 3 21 3 15" /><line x1="21" x2="14" y1="3" y2="10" /><line x1="3" x2="10" y1="21" y2="14" /></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="presets" id="presets"></div>
+
+      <label class="slider base">
+        <span class="lbl">Grundton</span>
+        <input type="range" id="base" min="0" max="1000" value="333" />
+        <span class="val" id="baseVal"></span>
+      </label>
+
+      <div class="more" id="more" hidden>
+        <label class="slider">
+          <span class="lbl">Phase</span>
+          <input type="range" id="phase" min="0" max="360" value="0" />
+          <span class="val" id="phaseVal"></span>
+        </label>
+        <label class="slider">
+          <span class="lbl">Wabbeln</span>
+          <input type="range" id="wobble" min="0" max="100" value="40" />
+          <span class="val" id="wobbleVal"></span>
+        </label>
+        <label class="slider draw-only">
+          <span class="lbl">Tempo</span>
+          <input type="range" id="tempo" min="0" max="1000" value="400" />
+          <span class="val" id="tempoVal"></span>
+        </label>
+        <div class="slider draw-only">
+          <span class="lbl">Spur</span>
+          <div class="seg small" id="trailSeg">
+            <button data-trail="tail" class="on">Schweif</button>
+            <button data-trail="keep">Bleibt</button>
+          </div>
+          <span class="val"></span>
+        </div>
+        <label class="slider draw-only tail-only">
+          <span class="lbl">Schweif</span>
+          <input type="range" id="tail" min="0" max="1000" value="450" />
+          <span class="val" id="tailVal"></span>
+        </label>
+        <p class="note">iPhone: Stummschalter aus, sonst kein Ton. Tasten: H ausblenden, M Modus, S Ton, 1–9 Intervalle.</p>
+      </div>
+    </section>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
