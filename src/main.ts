@@ -612,13 +612,17 @@ function pullPhase(dt: number, tempoEff: number) {
   off -= e * (1 - Math.exp(-dt / reactionTime(tempoEff)));
 }
 
-/** Reaktionszeit der Phase: <1 Hz ~20 s, 6 Hz ~4 s, 12 Hz ~1 s, ab 18 Hz sofort */
+/**
+ * Reaktionszeit der Phase (Zeitkonstante; ~95 % sind nach dem Dreifachen erreicht):
+ * unter 2 Hz gemächlich, ab 3 Hz unter einer Sekunde, ab 12 Hz praktisch sofort
+ */
 const REACTION: [number, number][] = [
-  [1, 20],
-  [6, 4],
-  [12, 1],
-  [18, 0.08],
-  [24, 0.04],
+  [1, 12],
+  [2, 3],
+  [3, 0.22],
+  [6, 0.12],
+  [12, 0.06],
+  [18, 0.04],
 ];
 function reactionTime(tempo: number) {
   if (tempo <= REACTION[0][0]) return REACTION[0][1];
