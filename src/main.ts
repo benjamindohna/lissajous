@@ -581,11 +581,12 @@ function scheduleHits(tempoEff: number, thB: number) {
  * Wirkt nur, solange sich das Verhältnis bewegt – im Stillstand läuft die
  * Phase frei, damit freie Verhältnisse sich natürlich drehen. Steht man exakt
  * auf einem Intervall, zieht es weiter sanft zur perfekten Form.
- * Die Reaktionszeit hängt am Tempo: langsam gemächlich, schnell sofort.
+ * Die Reaktionszeit hängt daran, wie gut man die Figur sieht: ganz → sofort.
  */
-function pullPhase(dt: number, tempoEff: number) {
+function pullPhase(dt: number) {
   const moving = rNow !== state.r;
   let e: number;
+  let a: number; // Figur, deren Sichtbarkeit die Reaktionszeit bestimmt
   if (moving) {
     const anchors = visiblePresets().map((p) => ({ c: cents(p.b / p.a), a: p.a }));
     if (state.exact) anchors.push({ c: cents(state.exact[1] / state.exact[0]), a: state.exact[0] });
@@ -604,33 +605,47 @@ function pullPhase(dt: number, tempoEff: number) {
     if (c >= anchors[anchors.length - 1].c) lo = hi = anchors[anchors.length - 1];
     const wHi = hi.c > lo.c ? (c - lo.c) / (hi.c - lo.c) : 0;
     e = (1 - wHi) * phaseError(lo.a) + wHi * phaseError(hi.a);
+    a = state.exact ? state.exact[0] : wHi > 0.5 ? hi.a : lo.a;
   } else if (state.exact) {
     e = phaseError(state.exact[0]);
+    a = state.exact[0];
   } else {
     return; // freies Verhältnis in Ruhe: dreht sich natürlich
   }
-  off -= e * (1 - Math.exp(-dt / reactionTime(tempoEff)));
+  off -= e * (1 - Math.exp(-dt / reactionTime(figureVisibility(a))));
 }
 
 /**
- * Reaktionszeit der Phase (Zeitkonstante; ~95 % sind nach dem Dreifachen erreicht):
- * unter 2 Hz gemächlich, ab 3 Hz unter einer Sekunde, ab 12 Hz praktisch sofort
+ * Wie viel einer a:b-Figur gerade zu sehen ist (0..1). Die Figur ist nach a
+ * Schwingungen von A vollständig. Bleibt: was schon gezeichnet ist. Schweif:
+ * Tempo × Schweiflänge; langsam zählt nur der hellere vordere Teil (~58 %),
+ * schnell leuchtet die Spur gleichmäßig und zählt ganz.
+ */
+function figureVisibility(a: number) {
+  if (state.trail === 'keep') return Math.min(1, (thA - thStart) / (TAU * a));
+  const lt = Math.log(Math.max(state.tempo, 1e-3));
+  const even = smoothstep(Math.log(HEAD_FADE[0]), Math.log(HEAD_FADE[1]), lt);
+  const readable = state.tempo * state.tail * (0.58 + 0.42 * even);
+  return Math.min(1, readable / a);
+}
+
+/**
+ * Reaktionszeit der Phase (Zeitkonstante) nach Sichtbarkeit der Figur:
+ * ganze Figur erkennbar → sofort, nur ein Punkt mit Schweif → sehr gemächlich
  */
 const REACTION: [number, number][] = [
-  [1, 12],
-  [2, 3],
-  [3, 0.22],
-  [6, 0.12],
-  [12, 0.06],
-  [18, 0.04],
+  [0.2, 20],
+  [0.45, 3],
+  [0.7, 0.4],
+  [0.9, 0.04],
 ];
-function reactionTime(tempo: number) {
-  if (tempo <= REACTION[0][0]) return REACTION[0][1];
+function reactionTime(visibility: number) {
+  if (visibility <= REACTION[0][0]) return REACTION[0][1];
   for (let i = 1; i < REACTION.length; i++) {
-    const [t1, r1] = REACTION[i];
-    if (tempo <= t1) {
-      const [t0, r0] = REACTION[i - 1];
-      const f = Math.log(tempo / t0) / Math.log(t1 / t0);
+    const [v1, r1] = REACTION[i];
+    if (visibility <= v1) {
+      const [v0, r0] = REACTION[i - 1];
+      const f = (visibility - v0) / (v1 - v0);
       return Math.exp(Math.log(r0) + (Math.log(r1) - Math.log(r0)) * f);
     }
   }
@@ -683,7 +698,7 @@ function frame(now: number) {
   const omegaNom = TAU * state.tempo;
   const prevA = thA;
   thA += TAU * tempoEff * dt;
-  pullPhase(dt, tempoEff);
+  pullPhase(dt);
 
   // Kein Nachjustieren der Phase: ein Intervall kommt genau so an, wie es gerade
   // schwingt (Neu zeichnen startet wieder mit beiden Tönen bei null)
@@ -796,4 +811,4 @@ updateTexts();
 layout();
 requestAnimationFrame(frame);
 
-if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
+if (import.meta.env.DEV) (window as any).__lj = { stage, state, strikes: () => strikeCount, resetStrikes: () => (strikeCount = [0, 0]), visibility: figureVisibility, phaseError: () => phaseError((state.exact ?? [fig.a])[0]) };
