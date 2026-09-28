@@ -130,12 +130,13 @@ export class Stage {
   }
 
   /** Intensität der Mittelmarkierungen (0 = ruhend, 1 = frisch angeschlagen) */
-  setTicks(fx: number, fy: number) {
+  /** fx/fy: Leuchten der Mittelmarkierungen; dots: Sichtbarkeit der Achsenpunkte */
+  setTicks(fx: number, fy: number, dots = 1) {
     const base = 0.35;
     this.tickX.mat.color.setRGB(base + fx * 2.2, base + fx * 2.6, base + fx * 3);
     this.tickY.mat.color.setRGB(base + fy * 2.2, base + fy * 2.6, base + fy * 3);
-    this.dotX.material.opacity = 0.55 + fx * 0.8;
-    this.dotY.material.opacity = 0.55 + fy * 0.8;
+    this.dotX.material.opacity = (0.55 + fx * 0.8) * dots;
+    this.dotY.material.opacity = (0.55 + fy * 0.8) * dots;
   }
 
   setAxesDim(dim: number) {

@@ -37,7 +37,7 @@ const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const DISSOLVE_S = 0.9; // radioaktives Verschwinden/Erscheinen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
-const HIT_FADE: [number, number] = [4, 14]; // Hz: Achsenmarkierungen hören auf zu blitzen
+const VIS_FADE: [number, number] = [6, 22]; // Hz: Punkt/Blitzen → ruhige, glimmende Form
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number, d = 1) => v.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: 0 });
@@ -580,6 +580,8 @@ function frame(now: number) {
   const amp = state.wobble * 0.035;
   const I = intensity(a, b);
   let bloomBoost = 0;
+  let vs = 0; // 0 = Punkt zeichnet, 1 = ruhige Form (Zeichnen-Modus, hohes Tempo)
+  let hv = 1;
 
   if (state.mode === 'form') {
     // freies Verhältnis: geschlossene Nachbarfigur, deren Phase langsam wandert
@@ -642,7 +644,9 @@ function frame(now: number) {
     const thB = rNow * thA + off;
 
     // Anschläge im Audio-Takt; die Markierungen blitzen nur bei langsamem Tempo
-    const flashLevel = 1 - smoothstep(HIT_FADE[0], HIT_FADE[1], tempoEff);
+    vs = smoothstep(Math.log(VIS_FADE[0]), Math.log(VIS_FADE[1]), Math.log(Math.max(tempoEff, 1e-3)));
+    hv = 1 - vs;
+    const flashLevel = hv;
     if (state.playing) scheduleHits(tempoEff, thB);
     if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) flashX = Math.max(flashX, flashLevel);
     if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, flashLevel);
@@ -652,37 +656,46 @@ function frame(now: number) {
     const keep = state.trail === 'keep';
     const full = TAU * a;
     const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
-    const u0 = Math.max(thStart, thA - span0);
-    const span = thA - u0;
+    // Zeigt die Spur die ganze Figur, wird sie in fester Reihenfolge gezeichnet
+    // (ab einem Periodenanfang). Sonst wechselt an Kreuzungen ständig, welche
+    // Linie oben liegt – das sah aus wie Blinken.
+    const whole = span0 >= full && thA - thStart >= full;
+    const u0 = whole ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0);
+    const span = whole ? full : thA - u0;
     const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
     const Id = I * 1.25;
-    const hv = 1 - smoothstep(3, 12, tempoEff); // schnell: gleichmäßig wie die Form
+    const shimmer = 0.22 * state.wobble * vs;
     for (let i = 0; i < n; i++) {
       const u = u0 + (span * i) / (n - 1);
       wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
       pts[i * 3] = w.x;
       pts[i * 3 + 1] = w.y;
       pts[i * 3 + 2] = 0;
-      const age = (thA - u) / omegaNom;
+      let age = (thA - u) / omegaNom;
+      if (age < 0) age += full / omegaNom;
       let s: number;
       if (keep) s = Id * 0.5 + Id * 1.1 * Math.exp(-age / 0.45) + 1.1 * Math.exp(-age / 0.08);
       else s = Id * Math.pow(Math.max(0, 1 - age / state.tail), 1.6) + 1.1 * Math.exp(-age / 0.08);
-      s = hv * s + (1 - hv) * I;
+      // schnell: Spur geht in die gleichmäßig leuchtende, leicht glimmende Form über
+      const f = (u - u0) / full;
+      s = hv * s + vs * I * (1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6));
       const ci = paletteIndex(u / full);
       cols[i * 3] = PALETTE[ci] * s;
       cols[i * 3 + 1] = PALETTE[ci + 1] * s;
       cols[i * 3 + 2] = PALETTE[ci + 2] * s;
     }
     stage.curve.set(pts, cols, n);
-    const h = (n - 1) * 3;
-    stage.setHead(pts[h], pts[h + 1], 1 + 0.07 * Math.sin(time * 7));
+    wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
+    stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
     stage.setHeadVisibility(hv);
   }
 
   const decay = Math.exp(-dt * 5);
   flashX *= decay;
   flashY *= decay;
-  stage.setTicks(flashX, flashY);
+  // schnell: statt hektischem Blitzen ein ruhiges Glimmen der Mittelmarkierungen
+  const glim = vs * (0.22 + 0.1 * Math.sin(time * 1.7));
+  stage.setTicks(Math.max(flashX, glim), Math.max(flashY, glim * (1 + 0.15 * Math.sin(time * 2.3 + 1))), hv);
   stage.bloom.strength = 0.75 + bloomBoost + state.wobble * 0.18 * Math.sin(time * 2.3) * Math.sin(time * 0.7 + 1);
 
   audio.setFreqs(state.base, freqB());
