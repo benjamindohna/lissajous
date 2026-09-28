@@ -91,6 +91,10 @@ const audioPh = [0, 0];
 let strikeCount = [0, 0]; // für Tests
 let holdingBase = false;
 let time = 0;
+// gezeigte Figurenlänge und Helligkeit (gleiten weich, siehe Schleife)
+const EASE_S = 0.3;
+let full = TAU * fig.a;
+let shownI = intensity(fig.a, fig.b);
 let frameNo = 0;
 
 /** Abstand der aktuellen Phase zur nächsten „perfekten" Phase eines a:b-Intervalls */
@@ -632,17 +636,22 @@ function frame(now: number) {
   // dann ganze Figur in fester Reihenfolge (sonst wechselt an Kreuzungen, welche
   // Linie oben liegt). Sonst gleitet das Fenster mit; zeigt es eine ganze Runde,
   // wird das älteste Stück weich ausgeblendet und überlappt – keine harte Kante.
+  // Länge einer Figur (a Runden von A) und Helligkeit gleiten weich zum neuen
+  // Wert – beim freien Ziehen springt a sonst hart (z. B. 2 → 25 → 3 Runden).
   const keep = state.trail === 'keep';
-  const full = TAU * a;
+  const fullTarget = TAU * a;
+  full = full * Math.pow(fullTarget / full, 1 - Math.exp(-dt / EASE_S));
+  if (Math.abs(full - fullTarget) < 1e-4 * fullTarget) full = fullTarget;
+  shownI += (I - shownI) * (1 - Math.exp(-dt / EASE_S));
   const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
   const round = span0 >= full && thA - thStart >= full;
-  const closed = round && !!state.exact && rNow === rTarget;
+  const closed = round && !!state.exact && rNow === rTarget && full === fullTarget;
   const overlap = round && !closed ? full * (0.15 + 0.15 * gl) : 0;
   const u0 = closed ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0 - overlap);
   const span = closed ? full : thA - u0;
   const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
 
-  const Id = I * 1.25;
+  const Id = shownI * 1.25;
   const shimmer = 0.22 * state.wobble * gl;
   for (let i = 0; i < n; i++) {
     const f = i / (n - 1);
@@ -662,7 +671,7 @@ function frame(now: number) {
       const chunk = Math.floor(f * 48);
       flicker = 1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6) + 0.14 * gl * (hash(chunk * 3.1 + frameNo * 0.37) - 0.5);
     }
-    s = (hv * s + vs * I) * flicker;
+    s = (hv * s + vs * shownI) * flicker;
     if (overlap > 0) s *= smoothstep(0, overlap, u - u0); // weiche Naht statt Kante
     const ci = paletteIndex(u / full);
     cols[i * 3] = PALETTE[ci] * s;
