@@ -36,14 +36,15 @@ const SPECS: Record<Klang, Spec> = {
   orgel: { partials: [p(1, 0.5, 1), p(2, 0.28, 1), p(3, 0.18, 0.9), p(4, 0.1, 0.8)], dur: () => 0.32, attack: 0.008, click: 0 },
 };
 
-// Übergang Einzelschläge → gehaltener Ton (Schläge pro Sekunde, logarithmisch)
-const SUSTAIN_FROM = 8;
-const SUSTAIN_TO = 70;
+// Übergang Einzelschläge → gehaltener Ton, gemessen am Tempo von Ton A (Hz, logarithmisch).
+// Beide Töne gehen gemeinsam über, damit es an derselben Reglerstelle passiert.
+const SUSTAIN_FROM = 17;
+const SUSTAIN_TO = 23;
 
 /** 0 = einzelne Schläge, 1 = gehaltener Ton */
-export function sustainAmount(rate: number) {
-  if (rate <= SUSTAIN_FROM) return 0;
-  const t = clamp(Math.log(rate / SUSTAIN_FROM) / Math.log(SUSTAIN_TO / SUSTAIN_FROM), 0, 1);
+export function sustainAmount(tempo: number) {
+  if (tempo <= SUSTAIN_FROM) return 0;
+  const t = clamp(Math.log(tempo / SUSTAIN_FROM) / Math.log(SUSTAIN_TO / SUSTAIN_FROM), 0, 1);
   return t * t * (3 - 2 * t);
 }
 
@@ -100,9 +101,8 @@ class Voice {
     return part.level * level * (part.harmonic ? 1 : 1 - s);
   }
 
-  /** Anschlag zur Zeit t; rate = Schläge pro Sekunde dieser Stimme */
-  strike(t: number, rate: number) {
-    const s = sustainAmount(rate);
+  /** Anschlag zur Zeit t; rate = Schläge pro Sekunde dieser Stimme, s = sustainAmount */
+  strike(t: number, rate: number, s: number) {
     const gap = 1 / Math.max(rate, 1e-3);
     const { spec } = this;
     if (this.held) {
@@ -112,7 +112,7 @@ class Voice {
     const base = spec.dur(this.freq);
     spec.partials.forEach((part, i) => {
       const natural = (base * part.rel) / 9.2; // Zeitkonstante für −80 dB nach „dur"
-      const tau = Math.max(natural, gap * 25 * s);
+      const tau = Math.max(natural, gap * 25 * s * s);
       const g = this.envs[i].gain;
       g.setTargetAtTime(this.peak(part, s), t, spec.attack / 3);
       g.setTargetAtTime(0, t + spec.attack, tau);
@@ -274,9 +274,9 @@ export class AudioEngine {
     if (this.ready) this.voices[axis].hold();
   }
 
-  strike(axis: 0 | 1, when: number, rate: number) {
+  strike(axis: 0 | 1, when: number, rate: number, s: number) {
     if (!this.ready) return;
-    this.voices[axis].strike(Math.max(when, this.ctx!.currentTime), rate);
+    this.voices[axis].strike(Math.max(when, this.ctx!.currentTime), rate, s);
   }
 
   /** Pause: sanft ausklingen lassen, mit kurzem Echo */

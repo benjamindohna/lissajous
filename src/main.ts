@@ -525,6 +525,7 @@ function scheduleHits(tempoEff: number, thB: number) {
   const tNow = audio.now;
   const horizon = tNow + LOOKAHEAD;
   const wA = TAU * tempoEff;
+  const sus = sustainAmount(tempoEff);
   const axes: [0 | 1, number, number][] = [
     [0, thA, wA],
     [1, thB, wA * rNow],
@@ -535,14 +536,14 @@ function scheduleHits(tempoEff: number, thB: number) {
     const rate = w / Math.PI; // zwei Nulldurchgänge pro Schwingung
     if (axis === 0 && holdingBase) {
       // Grundton wird gerade gehalten
-    } else if (sustainAmount(rate) > 0.995) {
+    } else if (sus > 0.995) {
       audio.hold(axis);
     } else if (w > 1e-4) {
       let k = Math.floor((th + w * (from - tNow)) / Math.PI) + 1;
       for (let guard = 0; guard < 200; guard++, k++) {
         const t = tNow + (k * Math.PI - th) / w;
         if (t > horizon) break;
-        if (t >= from) audio.strike(axis, t, rate);
+        if (t >= from) audio.strike(axis, t, rate, sus);
       }
     }
     if (axis === 0) schedA = horizon;
