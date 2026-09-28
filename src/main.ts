@@ -231,6 +231,7 @@ document.querySelectorAll<HTMLButtonElement>('#trailSeg button').forEach((b) =>
 // Intervall-Buttons und Punkte auf dem Regler
 const presetsEl = $('presets');
 const marksEl = $('marks');
+// Buttons in Reglerreihenfolge (tief → hoch), damit Punkte und Buttons zusammenpassen
 const byPitch = [...PRESETS].sort((p, q) => p.b / p.a - q.b / q.a);
 byPitch.forEach((p) => {
   const el = document.createElement('button');
