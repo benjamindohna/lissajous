@@ -37,7 +37,6 @@ const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmol
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
 const HEAD_FADE: [number, number] = [2.5, 8]; // Hz: Kopf/Blitzen → ruhige Form (vor dem Stroboskop-Effekt)
 const GLIMMER: [number, number] = [8, 20]; // Hz: leichtes Glimmen/Flimmern der ruhigen Form
-const MORPH_S = 0.45; // Formwechsel
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const fmt = (v: number, d = 1) => v.toLocaleString('de-DE', { maximumFractionDigits: d, minimumFractionDigits: 0 });
@@ -92,20 +91,6 @@ let holdingBase = false;
 let time = 0;
 let frameNo = 0;
 
-// Formwechsel-Morph: letzte gezeigte Form (ohne Wabbeln) als Ausgangspunkt
-const shapeBuf = new Float32Array(MAX_POINTS * 2);
-const morphFrom = new Float32Array(MAX_POINTS * 2);
-let shapeN = 0;
-let morphN = 0;
-let morphT = 1;
-let shapeA = 0;
-let shapeB = 0;
-
-const easeOutBack = (t: number) => {
-  const c = 1.3;
-  const u = t - 1;
-  return 1 + (c + 1) * u * u * u + c * u * u;
-};
 const hash = (x: number) => {
   const h = Math.sin(x * 127.1 + 311.7) * 43758.5453;
   return h - Math.floor(h);
@@ -570,12 +555,6 @@ function frame(now: number) {
   }
   const thB = rNow * thA + off;
 
-  // Gezeichnet wird immer die geschlossene Figur a:b. Bei freien Verhältnissen
-  // wandert ihre Phase psi mit – so dreht sie sich, bleibt aber immer geschlossen.
-  // Am Kopf (u = thA) stimmt sie exakt mit der echten Bewegung überein.
-  const rho = b / a;
-  const psi = off + (rNow - rho) * thA;
-
   // hv: Kopf, Nahtstelle, Achsenpunkte (weg, bevor der Stroboskop-Effekt einsetzt)
   // vs: ruhige, gleichmäßige Form; gl: bewusstes Glimmen bei hohem Tempo
   const lt = Math.log(Math.max(tempoEff, 1e-3));
@@ -587,49 +566,26 @@ function frame(now: number) {
   if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, hv);
   lastThB = thB;
 
-  // Spur: ganze Figur in fester Reihenfolge (sonst wechselt an Kreuzungen,
-  // welche Linie oben liegt) oder nur der Schweif hinter dem Kopf
+  // Spur = echte Bewegung. Saubere, eingeschwungene Verhältnisse schließen sich:
+  // dann ganze Figur in fester Reihenfolge (sonst wechselt an Kreuzungen, welche
+  // Linie oben liegt). Sonst gleitet das Fenster mit; zeigt es eine ganze Runde,
+  // wird das älteste Stück weich ausgeblendet und überlappt – keine harte Kante.
   const keep = state.trail === 'keep';
   const full = TAU * a;
   const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
-  const whole = span0 >= full && thA - thStart >= full;
-  const u0 = whole ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0);
-  const span = whole ? full : thA - u0;
-  const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rho) * span) / TAU) * 80) + 2));
-
-  // Formwechsel: vom zuletzt gezeigten Bild weich (mit leichtem Überschwingen) in die neue Figur
-  if (a !== shapeA || b !== shapeB) {
-    if (shapeN > 1) {
-      morphFrom.set(shapeBuf.subarray(0, shapeN * 2));
-      morphN = shapeN;
-      morphT = 0;
-    }
-    shapeA = a;
-    shapeB = b;
-  }
-  morphT = Math.min(1, morphT + dt / MORPH_S);
-  const mk = morphT >= 1 ? 1 : easeOutBack(morphT);
+  const round = span0 >= full && thA - thStart >= full;
+  const closed = round && !!state.exact && rNow === rTarget;
+  const overlap = round && !closed ? full * (0.15 + 0.15 * gl) : 0;
+  const u0 = closed ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0 - overlap);
+  const span = closed ? full : thA - u0;
+  const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
 
   const Id = I * 1.25;
   const shimmer = 0.22 * state.wobble * gl;
   for (let i = 0; i < n; i++) {
     const f = i / (n - 1);
     const u = u0 + span * f;
-    let x = Math.sin(u);
-    let y = Math.sin(rho * u + psi);
-    if (mk < 1) {
-      const j = f * (morphN - 1);
-      const j0 = Math.floor(j);
-      const j1 = Math.min(morphN - 1, j0 + 1);
-      const t = j - j0;
-      const ox = morphFrom[j0 * 2] + (morphFrom[j1 * 2] - morphFrom[j0 * 2]) * t;
-      const oy = morphFrom[j0 * 2 + 1] + (morphFrom[j1 * 2 + 1] - morphFrom[j0 * 2 + 1]) * t;
-      x = ox + (x - ox) * mk;
-      y = oy + (y - oy) * mk;
-    }
-    shapeBuf[i * 2] = x; // gezeigte Form, Startpunkt für den nächsten Wechsel
-    shapeBuf[i * 2 + 1] = y;
-    wobble(x, y, time, amp, w);
+    wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
     pts[i * 3] = w.x;
     pts[i * 3 + 1] = w.y;
     pts[i * 3 + 2] = 0;
@@ -645,12 +601,12 @@ function frame(now: number) {
       flicker = 1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6) + 0.14 * gl * (hash(chunk * 3.1 + frameNo * 0.37) - 0.5);
     }
     s = (hv * s + vs * I) * flicker;
-    const ci = paletteIndex(f * (span / full) + u0 / full);
+    if (overlap > 0) s *= smoothstep(0, overlap, u - u0); // weiche Naht statt Kante
+    const ci = paletteIndex(u / full);
     cols[i * 3] = PALETTE[ci] * s;
     cols[i * 3 + 1] = PALETTE[ci + 1] * s;
     cols[i * 3 + 2] = PALETTE[ci + 2] * s;
   }
-  shapeN = n;
   stage.curve.set(pts, cols, n);
   wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
   stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
