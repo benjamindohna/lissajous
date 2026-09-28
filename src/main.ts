@@ -1,11 +1,10 @@
 import './style.css';
 import { Stage, AXIS, MAX_POINTS } from './stage';
-import { SpringCurve, pts, cols, PALETTE, paletteIndex, intensity, wobble, hash, setPalette, stepPalette, TAU } from './figure';
+import { pts, cols, PALETTE, paletteIndex, intensity, wobble, setPalette, stepPalette, TAU } from './figure';
 import { AudioEngine, KLAENGE, sustainAmount, type Klang } from './audio';
 import { PRESETS, MAX_TERM, reduce, intervalName, formatNote, approximate, cents } from './ratio';
 import { THEMES, hexToRgb, type Theme } from './themes';
 
-type Mode = 'form' | 'draw';
 type Trail = 'tail' | 'keep';
 
 const state = {
@@ -13,11 +12,12 @@ const state = {
   exact: [2, 3] as [number, number] | null, // gesetzt = sauberes Verhältnis (Button, Einrasten, Eingabe)
   phase: 0,
   base: 220,
-  mode: 'form' as Mode,
   playing: true,
   snap: true,
+  allIntervals: false, // sonst nur die harmonischen
+  axisLabels: false,
   wobble: 0.4,
-  tempo: 0.4, // Hz, sichtbare Schwingung von Ton A im Zeichnen-Modus
+  tempo: 0.4, // Hz, sichtbare Schwingung von Ton A
   tempoV: 250, // Reglerstellung 0..1000
   trail: 'tail' as Trail,
   tail: 1.5, // Sekunden
@@ -27,15 +27,13 @@ const state = {
   volume: 0.8,
 };
 
-// Figur: a× A gegen b× B, delta = Rest bei freien Verhältnissen
+// Figur: a× A gegen b× B schließt sich (bei freien Verhältnissen die nächstliegende)
 let fig = { a: 2, b: 3, delta: 0 };
 
 const SNAP_CENTS = 35; // Fangbereich beim Loslassen
 const NEAR_CENTS = 45; // bis hier „fast Quinte"
-const DRIFT_HZ = 8; // Drehgeschwindigkeit freier Verhältnisse im Form-Modus
 const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
-const DISSOLVE_S = 0.9; // radioaktives Verschwinden/Erscheinen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
 const VIS_FADE: [number, number] = [6, 22]; // Hz: Punkt/Blitzen → ruhige, glimmende Form
 
@@ -73,37 +71,34 @@ const store = {
 
 const canvas = $<HTMLCanvasElement>('c');
 const stage = new Stage(canvas);
-const spring = new SpringCurve();
 const audio = new AudioEngine();
 
-// Wiedergabe
 let speed = 1; // 0..1, gebremst beim Pausieren
-let presence = 1; // Form-Modus: 0 = verschwunden, 1 = da
-let dissolveSeed = 0;
-let frameNo = 0;
 
-// Zeichnen-Modus: zwei durchlaufende Phasen, B = rNow·A + off
+// zwei durchlaufende Phasen, B = rNow·A + off
 let thA = 0;
 let off = 0;
 let thStart = 0; // Beginn der aktuellen Zeichnung
 let lastThB = 0;
 let rNow = state.r; // gleitet zum Ziel state.r
 
-// Form-Modus: aufgelaufene Drift freier Verhältnisse
-let psi = 0;
 let flashX = 0;
+let flashY = 0;
 let schedA = 0; // bis hierhin sind Anschläge im Audio-Takt geplant
 let schedB = 0;
-let flashY = 0;
 let holdingBase = false;
 let time = 0;
 
 const freqB = () => state.base * rNow;
 
+// Intervalle in Reglerreihenfolge (tief → hoch)
+const byPitch = [...PRESETS].sort((p, q) => p.b / p.a - q.b / q.a);
+const visiblePresets = () => byPitch.filter((p) => state.allIntervals || p.consonant);
+
 function nearestPreset(r: number) {
-  let best = PRESETS[0];
+  let best = visiblePresets()[0];
   let diff = Infinity;
-  for (const p of PRESETS) {
+  for (const p of visiblePresets()) {
     const d = Math.abs(cents(r) - cents(p.b / p.a));
     if (d < diff) {
       diff = d;
@@ -128,7 +123,6 @@ function ratioLabel() {
 }
 
 function updateTexts() {
-  const { a, b } = fig;
   const near = nearestPreset(state.r);
   let name: string;
   if (state.exact) name = intervalName(state.exact[0], state.exact[1]) ?? 'Eigenes Verhältnis';
@@ -136,18 +130,6 @@ function updateTexts() {
   else name = 'Freies Verhältnis';
   $('nowName').textContent = name;
   $('nowRatio').textContent = ratioLabel();
-
-  let meta: string;
-  if (state.exact) {
-    const real = (a / state.base) * 1000;
-    meta =
-      state.mode === 'form'
-        ? `schließt sich nach ${a}× A und ${b}× B · in Echtzeit ${fmt(real, real < 10 ? 1 : 0)} ms`
-        : `schließt sich nach ${a}× A und ${b}× B · hier ${fmt(a / state.tempo)} s`;
-  } else {
-    meta = `schließt sich nie ganz · dreht sich um ${a} : ${b}`;
-  }
-  $('nowMeta').textContent = meta;
 
   if (document.activeElement !== ratioInput) ratioInput.value = ratioLabel();
   labA.innerHTML = `<b>A</b>${fmt(state.base, 0)} Hz · ${formatNote(state.base)}`;
@@ -167,7 +149,7 @@ function updateTexts() {
     const pa = +el.dataset.a!;
     const pb = +el.dataset.b!;
     const on = !!ex && ex[0] === pa && ex[1] === pb;
-    if (on && !el.classList.contains('on') && el.classList.contains('chip')) {
+    if (on && !el.classList.contains('on') && el.classList.contains('chip') && !el.hidden) {
       el.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' });
     }
     el.classList.toggle('on', on);
@@ -191,57 +173,23 @@ function layout() {
 
 /* ---------- Zustand ändern ---------- */
 
-function refreshTargets() {
-  spring.setTarget(fig.a, fig.b, state.phase + psi);
-}
-
-/** Pausierte Form kommt zurück, sobald man am Verhältnis dreht */
-function wakeForm() {
-  if (!state.playing && state.mode === 'form') setPlaying(true);
-}
-
-/** sauberes Verhältnis a:b (Button, Einrasten, Eingabe) – Figur schnappt federnd um */
-function setExact(a: number, b: number, kick = 0.8) {
+/** sauberes Verhältnis a:b (Button, Einrasten, Eingabe) */
+function setExact(a: number, b: number) {
   const same = state.exact && state.exact[0] === a && state.exact[1] === b;
   if (same) return;
   state.exact = [a, b];
   state.r = b / a;
   fig = { a, b, delta: 0 };
-  psi = 0;
-  refreshTargets();
-  spring.reseed();
-  if (kick) spring.kick(kick);
   rSlider.value = String(sliderFromRatio(state.r));
-  wakeForm();
   updateTexts();
 }
 
-/** freies Verhältnis vom Regler – Figur folgt weich, driftet wenn es sich nicht schließt */
+/** freies Verhältnis vom Regler – schließt sich nie ganz, dreht sich langsam */
 function setFree(r: number) {
   state.exact = null;
   state.r = r;
-  const next = approximate(r);
-  if (next.a !== fig.a || next.b !== fig.b) {
-    psi = 0;
-    spring.reseed();
-  }
-  fig = next;
-  refreshTargets();
-  wakeForm();
+  fig = approximate(r);
   updateTexts();
-}
-
-function setMode(m: Mode) {
-  state.mode = m;
-  document.body.classList.toggle('mode-draw', m === 'draw');
-  document.querySelectorAll<HTMLButtonElement>('#modeSeg button').forEach((b) => b.classList.toggle('on', b.dataset.mode === m));
-  $('restartBtn').hidden = m !== 'draw';
-  stage.setDrawDecor(m === 'draw');
-  thStart = thA;
-  lastThB = rNow * thA + off;
-  if (m === 'draw') audio.quiet();
-  updateTexts();
-  requestAnimationFrame(layout);
 }
 
 const playBtn = $('playBtn');
@@ -249,9 +197,7 @@ function setPlaying(on: boolean) {
   if (on === state.playing) return;
   state.playing = on;
   playBtn.classList.toggle('on', on);
-  dissolveSeed = Math.random() * 1000;
   if (!on) audio.release();
-  else if (state.mode === 'form') spring.kick(0.5);
 }
 
 function applyTheme(t: Theme, immediate = false) {
@@ -271,6 +217,24 @@ function applyKlang(k: Klang) {
   audio.setKlang(k);
   document.querySelectorAll<HTMLElement>('#klangSeg button').forEach((b) => b.classList.toggle('on', b.dataset.klang === k));
   store.set('klang', k);
+}
+
+function setAllIntervals(on: boolean) {
+  state.allIntervals = on;
+  $('allBtn').classList.toggle('on', on);
+  document.querySelectorAll<HTMLElement>('[data-a]').forEach((el) => {
+    const p = byPitch.find((q) => q.a === +el.dataset.a! && q.b === +el.dataset.b!);
+    el.hidden = !on && !!p && !p.consonant;
+  });
+  store.set('allIntervals', on ? '1' : '0');
+  updateTexts();
+}
+
+function setAxisLabels(on: boolean) {
+  state.axisLabels = on;
+  document.body.classList.toggle('axis-labels', on);
+  $('axisBtn').classList.toggle('on', on);
+  store.set('axisLabels', on ? '1' : '0');
 }
 
 let hintTimer = 0;
@@ -303,20 +267,15 @@ const unlock = () => {
 window.addEventListener('pointerdown', unlock, { capture: true });
 window.addEventListener('keydown', unlock, { capture: true });
 
-document.querySelectorAll<HTMLButtonElement>('#modeSeg button').forEach((b) =>
-  b.addEventListener('click', () => setMode(b.dataset.mode as Mode)),
-);
-
 playBtn.addEventListener('click', () => {
   // der erste Tipp startet nur den Ton, statt gleich zu pausieren
   if (!audioWasReady && state.playing) return;
   setPlaying(!state.playing);
 });
 
-// Intervall-Buttons (in Reglerreihenfolge tief → hoch) und Punkte auf dem Regler
+// Intervall-Buttons und Punkte auf dem Regler
 const presetsEl = $('presets');
 const marksEl = $('marks');
-const byPitch = [...PRESETS].sort((p, q) => p.b / p.a - q.b / q.a);
 byPitch.forEach((p) => {
   const el = document.createElement('button');
   el.className = 'chip';
@@ -333,13 +292,14 @@ byPitch.forEach((p) => {
   m.style.left = `${Math.log2(p.b / p.a) * 100}%`;
   marksEl.appendChild(m);
 });
+$('allBtn').addEventListener('click', () => setAllIntervals(!state.allIntervals));
 
 // Verhältnis-Regler: frei ziehen, beim Loslassen einrasten
 rSlider.addEventListener('input', () => setFree(ratioFromSlider(+rSlider.value)));
 rSlider.addEventListener('change', () => {
   if (!state.snap || state.exact) return;
   const near = nearestPreset(state.r);
-  if (near.cents <= SNAP_CENTS) setExact(near.preset.a, near.preset.b, 0.3);
+  if (near.cents <= SNAP_CENTS) setExact(near.preset.a, near.preset.b);
 });
 const snapBtn = $('snapBtn');
 snapBtn.addEventListener('click', () => {
@@ -375,7 +335,6 @@ ratioInput.addEventListener('change', () => {
   } else {
     setFree(res.r);
     rSlider.value = String(sliderFromRatio(res.r));
-    spring.kick(0.5);
   }
   ratioInput.value = ratioLabel();
 });
@@ -426,6 +385,7 @@ for (const k of KLAENGE) {
   el.addEventListener('click', () => applyKlang(k.id));
   klangEl.appendChild(el);
 }
+$('axisBtn').addEventListener('click', () => setAxisLabels(!state.axisLabels));
 
 const volumeSlider = $<HTMLInputElement>('volume');
 volumeSlider.addEventListener('input', () => {
@@ -442,7 +402,7 @@ baseSlider.addEventListener('pointerdown', () => {
 const release = () => {
   if (!holdingBase) return;
   holdingBase = false;
-  if (!(state.playing && state.mode === 'form')) audio.quiet(0);
+  audio.quiet(0);
 };
 window.addEventListener('pointerup', release);
 window.addEventListener('pointercancel', release);
@@ -456,7 +416,6 @@ phaseSlider.addEventListener('input', () => {
   const next = (+phaseSlider.value / 360) * TAU;
   off += next - state.phase;
   state.phase = next;
-  refreshTargets();
   updateTexts();
 });
 const wobbleSlider = $<HTMLInputElement>('wobble');
@@ -478,7 +437,6 @@ document.querySelectorAll<HTMLButtonElement>('#trailSeg button').forEach((b) =>
   }),
 );
 
-
 $('restartBtn').addEventListener('click', () => {
   thStart = thA;
 });
@@ -498,12 +456,11 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'escape') {
     if (state.zen) setZen(false);
     else toggleSheet(false);
-  } else if (k === 'm') setMode(state.mode === 'form' ? 'draw' : 'form');
-  else if (k === ' ') {
+  } else if (k === ' ') {
     e.preventDefault();
     setPlaying(!state.playing);
   } else if (/^[1-9]$/.test(k)) {
-    const p = byPitch[+k - 1];
+    const p = visiblePresets()[+k - 1];
     if (p) setExact(p.a, p.b);
   }
 });
@@ -560,13 +517,10 @@ function frame(now: number) {
   const dt = Math.min(0.05, (now - last) / 1000);
   last = now;
   time += dt;
-  frameNo++;
 
   stepPalette(dt);
   speed += ((state.playing ? 1 : 0) - speed) * (1 - Math.exp(-dt / BRAKE_TAU));
   if (speed < 0.002 && !state.playing) speed = 0;
-  const presTarget = state.playing ? 1 : 0;
-  presence += Math.sign(presTarget - presence) * Math.min(Math.abs(presTarget - presence), dt / DISSOLVE_S);
 
   // Verhältnis gleitet; die Phase von B wird so nachgeführt, dass der Punkt nicht springt
   const rTarget = state.r;
@@ -579,116 +533,64 @@ function frame(now: number) {
   const phase = state.phase;
   const amp = state.wobble * 0.035;
   const I = intensity(a, b);
-  let bloomBoost = 0;
-  let vs = 0; // 0 = Punkt zeichnet, 1 = ruhige Form (Zeichnen-Modus, hohes Tempo)
-  let hv = 1;
 
-  if (state.mode === 'form') {
-    // freies Verhältnis: geschlossene Nachbarfigur, deren Phase langsam wandert
-    if (fig.delta !== 0) {
-      psi += TAU * DRIFT_HZ * (fig.delta / a) * dt;
-      refreshTargets();
-    }
-    spring.step(dt);
+  const tempoEff = state.tempo * speed;
+  const omegaNom = TAU * state.tempo;
+  const prevA = thA;
+  thA += TAU * tempoEff * dt;
 
-    const n = spring.n;
-    if (presence <= 0) {
-      stage.curve.set(pts, cols, 0);
-    } else {
-      const P = spring.pos;
-      const shimmer = 0.22 * state.wobble;
-      // radioaktiv: Stücke flackern, zucken und zerfallen zu unterschiedlichen Zeiten
-      const pe = presence * presence * (3 - 2 * presence);
-      const d = 1 - pe;
-      const decaying = d > 0.001;
-      const grow = 1 + 0.18 * d * d;
-      const flash = 1 + 2.2 * d * pe;
-      bloomBoost = 0.9 * d * pe;
-      for (let i = 0; i < n; i++) {
-        wobble(P[i * 2], P[i * 2 + 1], time, amp, w);
-        let x = w.x;
-        let y = w.y;
-        let vis = 1;
-        if (decaying) {
-          const chunk = Math.floor(i / 26);
-          const hc = hash(chunk + dissolveSeed);
-          vis = smoothstep(hc * 0.6, hc * 0.6 + 0.4, pe) * (0.45 + 0.9 * hash(chunk * 7.3 + frameNo * 1.618));
-          const j = 0.12 * d;
-          x = x * grow + (hash(i * 1.7 + frameNo) - 0.5) * j;
-          y = y * grow + (hash(i * 2.9 + frameNo + 50) - 0.5) * j;
-        }
-        pts[i * 3] = x;
-        pts[i * 3 + 1] = y;
-        pts[i * 3 + 2] = 0;
-        const f = i / (n - 1);
-        const ci = paletteIndex(f);
-        const s = I * (1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6)) * vis * flash;
-        cols[i * 3] = PALETTE[ci] * s;
-        cols[i * 3 + 1] = PALETTE[ci + 1] * s;
-        cols[i * 3 + 2] = PALETTE[ci + 2] * s;
-      }
-      stage.curve.set(pts, cols, n);
-    }
-  } else {
-    const tempoEff = state.tempo * speed;
-    const omegaNom = TAU * state.tempo;
-    const prevA = thA;
-    thA += TAU * tempoEff * dt;
-
-    // saubere Verhältnisse: Punkt gleitet auf die kanonische Spur (wie im Form-Modus)
-    if (state.exact && rNow === rTarget) {
-      const k = Math.round(((off - phase) * a) / TAU);
-      const target = phase + (TAU * k) / a;
-      off += (target - off) * (1 - Math.exp(-dt / 0.35));
-    }
-    const thB = rNow * thA + off;
-
-    // Anschläge im Audio-Takt; die Markierungen blitzen nur bei langsamem Tempo
-    vs = smoothstep(Math.log(VIS_FADE[0]), Math.log(VIS_FADE[1]), Math.log(Math.max(tempoEff, 1e-3)));
-    hv = 1 - vs;
-    const flashLevel = hv;
-    if (state.playing) scheduleHits(tempoEff, thB);
-    if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) flashX = Math.max(flashX, flashLevel);
-    if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, flashLevel);
-    lastThB = thB;
-
-    // Spur analytisch aus der aktuellen Bewegung – ändert sich live beim Ziehen
-    const keep = state.trail === 'keep';
-    const full = TAU * a;
-    const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
-    // Zeigt die Spur die ganze Figur, wird sie in fester Reihenfolge gezeichnet
-    // (ab einem Periodenanfang). Sonst wechselt an Kreuzungen ständig, welche
-    // Linie oben liegt – das sah aus wie Blinken.
-    const whole = span0 >= full && thA - thStart >= full;
-    const u0 = whole ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0);
-    const span = whole ? full : thA - u0;
-    const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
-    const Id = I * 1.25;
-    const shimmer = 0.22 * state.wobble * vs;
-    for (let i = 0; i < n; i++) {
-      const u = u0 + (span * i) / (n - 1);
-      wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
-      pts[i * 3] = w.x;
-      pts[i * 3 + 1] = w.y;
-      pts[i * 3 + 2] = 0;
-      let age = (thA - u) / omegaNom;
-      if (age < 0) age += full / omegaNom;
-      let s: number;
-      if (keep) s = Id * 0.5 + Id * 1.1 * Math.exp(-age / 0.45) + 1.1 * Math.exp(-age / 0.08);
-      else s = Id * Math.pow(Math.max(0, 1 - age / state.tail), 1.6) + 1.1 * Math.exp(-age / 0.08);
-      // schnell: Spur geht in die gleichmäßig leuchtende, leicht glimmende Form über
-      const f = (u - u0) / full;
-      s = hv * s + vs * I * (1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6));
-      const ci = paletteIndex(u / full);
-      cols[i * 3] = PALETTE[ci] * s;
-      cols[i * 3 + 1] = PALETTE[ci + 1] * s;
-      cols[i * 3 + 2] = PALETTE[ci + 2] * s;
-    }
-    stage.curve.set(pts, cols, n);
-    wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
-    stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
-    stage.setHeadVisibility(hv);
+  // saubere Verhältnisse: Punkt gleitet auf die kanonische Spur
+  if (state.exact && rNow === rTarget) {
+    const k = Math.round(((off - phase) * a) / TAU);
+    const target = phase + (TAU * k) / a;
+    off += (target - off) * (1 - Math.exp(-dt / 0.35));
   }
+  const thB = rNow * thA + off;
+
+  // Anschläge im Audio-Takt; die Markierungen blitzen nur bei langsamem Tempo
+  const vs = smoothstep(Math.log(VIS_FADE[0]), Math.log(VIS_FADE[1]), Math.log(Math.max(tempoEff, 1e-3)));
+  const hv = 1 - vs;
+  if (state.playing) scheduleHits(tempoEff, thB);
+  if (Math.floor(thA / Math.PI) > Math.floor(prevA / Math.PI)) flashX = Math.max(flashX, hv);
+  if (Math.floor(thB / Math.PI) !== Math.floor(lastThB / Math.PI)) flashY = Math.max(flashY, hv);
+  lastThB = thB;
+
+  // Spur analytisch aus der aktuellen Bewegung – ändert sich live beim Ziehen
+  const keep = state.trail === 'keep';
+  const full = TAU * a;
+  const span0 = keep ? full : Math.min(full, omegaNom * state.tail);
+  // Zeigt die Spur die ganze Figur, wird sie in fester Reihenfolge gezeichnet
+  // (ab einem Periodenanfang). Sonst wechselt an Kreuzungen ständig, welche
+  // Linie oben liegt – das sah aus wie Blinken.
+  const whole = span0 >= full && thA - thStart >= full;
+  const u0 = whole ? Math.floor(thA / full) * full : Math.max(thStart, thA - span0);
+  const span = whole ? full : thA - u0;
+  const n = Math.max(2, Math.min(MAX_POINTS, Math.ceil(((Math.max(1, rNow) * span) / TAU) * 80) + 2));
+  const Id = I * 1.25;
+  const shimmer = 0.22 * state.wobble * vs;
+  for (let i = 0; i < n; i++) {
+    const u = u0 + (span * i) / (n - 1);
+    wobble(Math.sin(u), Math.sin(rNow * u + off), time, amp, w);
+    pts[i * 3] = w.x;
+    pts[i * 3 + 1] = w.y;
+    pts[i * 3 + 2] = 0;
+    let age = (thA - u) / omegaNom;
+    if (age < 0) age += full / omegaNom;
+    let s: number;
+    if (keep) s = Id * 0.5 + Id * 1.1 * Math.exp(-age / 0.45) + 1.1 * Math.exp(-age / 0.08);
+    else s = Id * Math.pow(Math.max(0, 1 - age / state.tail), 1.6) + 1.1 * Math.exp(-age / 0.08);
+    // schnell: Spur geht in die gleichmäßig leuchtende, leicht glimmende Form über
+    const f = (u - u0) / full;
+    s = hv * s + vs * I * (1 + shimmer * Math.sin(f * TAU * 3 - time * 1.6));
+    const ci = paletteIndex(u / full);
+    cols[i * 3] = PALETTE[ci] * s;
+    cols[i * 3 + 1] = PALETTE[ci + 1] * s;
+    cols[i * 3 + 2] = PALETTE[ci + 2] * s;
+  }
+  stage.curve.set(pts, cols, n);
+  wobble(Math.sin(thA), Math.sin(rNow * thA + off), time, amp, w);
+  stage.setHead(w.x, w.y, 1 + 0.07 * Math.sin(time * 7));
+  stage.setHeadVisibility(hv);
 
   const decay = Math.exp(-dt * 5);
   flashX *= decay;
@@ -696,19 +598,15 @@ function frame(now: number) {
   // schnell: statt hektischem Blitzen ein ruhiges Glimmen der Mittelmarkierungen
   const glim = vs * (0.22 + 0.1 * Math.sin(time * 1.7));
   stage.setTicks(Math.max(flashX, glim), Math.max(flashY, glim * (1 + 0.15 * Math.sin(time * 2.3 + 1))), hv);
-  stage.bloom.strength = 0.75 + bloomBoost + state.wobble * 0.18 * Math.sin(time * 2.3) * Math.sin(time * 0.7 + 1);
+  stage.bloom.strength = 0.75 + state.wobble * 0.18 * Math.sin(time * 2.3) * Math.sin(time * 0.7 + 1);
 
   audio.setFreqs(state.base, freqB());
   audio.setSolo(holdingBase);
   if (holdingBase) audio.hold(0);
-  if (state.playing && state.mode === 'form') {
-    audio.hold(0);
-    audio.hold(1);
-  }
   playBtn.classList.toggle('wait', state.playing && !audio.ready);
 
   stage.render(dt);
-  if (!state.zen) placeAxisLabels();
+  if (!state.zen && state.axisLabels) placeAxisLabels();
   requestAnimationFrame(frame);
 }
 
@@ -722,6 +620,8 @@ const savedVol = store.get('volume');
 if (savedVol !== null && !Number.isNaN(+savedVol)) state.volume = Math.min(1, Math.max(0, +savedVol));
 audio.setVolume(state.volume);
 volumeSlider.value = String(Math.round(state.volume * 100));
+setAllIntervals(store.get('allIntervals') === '1');
+setAxisLabels(store.get('axisLabels') === '1');
 
 baseSlider.value = String(Math.round((1000 * Math.log2(state.base / 110)) / 3));
 tempoSlider.value = String(state.tempoV);
@@ -730,8 +630,7 @@ tailSlider.value = String(Math.round((1000 * Math.log(state.tail / 0.3)) / Math.
 wobbleSlider.value = String(state.wobble * 100);
 rSlider.value = String(sliderFromRatio(state.r));
 off = state.phase;
-refreshTargets(); // Punkte starten im Ursprung und schnappen auf
-setMode('form');
+stage.setDrawDecor(true);
 updateTexts();
 layout();
 requestAnimationFrame(frame);

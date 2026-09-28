@@ -25,23 +25,24 @@ export interface Preset {
   name: string;
   a: number;
   b: number;
+  consonant: boolean; // „harmonisch": Prime, Oktave, Quinte, Quarte, Terzen, Sexten
 }
 
 // Grob nach Konsonanz sortiert
 export const PRESETS: Preset[] = [
-  { name: 'Prime', a: 1, b: 1 },
-  { name: 'Oktave', a: 1, b: 2 },
-  { name: 'Quinte', a: 2, b: 3 },
-  { name: 'Quarte', a: 3, b: 4 },
-  { name: 'gr. Sexte', a: 3, b: 5 },
-  { name: 'gr. Terz', a: 4, b: 5 },
-  { name: 'kl. Terz', a: 5, b: 6 },
-  { name: 'kl. Sexte', a: 5, b: 8 },
-  { name: 'kl. Septime', a: 9, b: 16 },
-  { name: 'gr. Sekunde', a: 8, b: 9 },
-  { name: 'gr. Septime', a: 8, b: 15 },
-  { name: 'kl. Sekunde', a: 15, b: 16 },
-  { name: 'Tritonus', a: 32, b: 45 },
+  { name: 'Prime', a: 1, b: 1, consonant: true },
+  { name: 'Oktave', a: 1, b: 2, consonant: true },
+  { name: 'Quinte', a: 2, b: 3, consonant: true },
+  { name: 'Quarte', a: 3, b: 4, consonant: true },
+  { name: 'gr. Sexte', a: 3, b: 5, consonant: true },
+  { name: 'gr. Terz', a: 4, b: 5, consonant: true },
+  { name: 'kl. Terz', a: 5, b: 6, consonant: true },
+  { name: 'kl. Sexte', a: 5, b: 8, consonant: true },
+  { name: 'kl. Septime', a: 9, b: 16, consonant: false },
+  { name: 'gr. Sekunde', a: 8, b: 9, consonant: false },
+  { name: 'gr. Septime', a: 8, b: 15, consonant: false },
+  { name: 'kl. Sekunde', a: 15, b: 16, consonant: false },
+  { name: 'Tritonus', a: 32, b: 45, consonant: false },
 ];
 
 export function intervalName(a: number, b: number): string | null {

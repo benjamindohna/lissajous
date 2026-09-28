@@ -319,7 +319,6 @@ button {
   text-align: right;
   white-space: nowrap;
 }
-body:not(.mode-draw) .draw-only,
 body.trail-keep .tail-only {
   display: none;
 }
@@ -638,5 +637,71 @@ body.zen .setbtn {
   color: var(--fg);
 }
 body.trail-keep .tail-only {
+  display: none;
+}
+
+/* Achsenbeschriftung nur auf Wunsch */
+body:not(.axis-labels) .axislabel {
+  display: none;
+}
+
+/* Tempo in der Kopfzeile des Panels */
+.row.main .tempo-row {
+  flex: 1;
+  min-width: 0;
+  grid-template-columns: auto 1fr auto;
+  margin: 0;
+}
+.row.main .tempo-row .val {
+  min-width: 44px;
+}
+.tempo-row .lbl {
+  padding-left: 2px;
+}
+
+/* Kästchen mit Haken */
+.pill.left {
+  left: 0;
+  right: auto;
+}
+.check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+}
+.check .box {
+  width: 15px;
+  height: 15px;
+  border-radius: 5px;
+  border: 1.5px solid var(--faint);
+  display: grid;
+  place-items: center;
+  transition: background 0.2s, border-color 0.2s;
+}
+.check .box svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: #05060a;
+  stroke-width: 3.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  opacity: 0;
+}
+.check.on .box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.check.on .box svg {
+  opacity: 1;
+}
+.row-check {
+  position: static;
+  align-self: flex-start;
+  font-size: 12.5px;
+}
+.chip[hidden],
+.mark[hidden] {
   display: none;
 }
