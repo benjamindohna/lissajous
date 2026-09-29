@@ -705,3 +705,113 @@ body:not(.axis-labels) .axislabel {
 .mark[hidden] {
   display: none;
 }
+
+/* Bedienfeld mit vertikalem Scroll: sichtbar ist der Hauptteil, darunter mehr */
+.panel {
+  gap: 0;
+}
+.panel-scroll {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  margin: 0 -12px;
+  padding: 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 10px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 10px), transparent);
+}
+.panel-scroll.at-end {
+  mask-image: none;
+  -webkit-mask-image: none;
+}
+.panel-scroll::-webkit-scrollbar {
+  display: none;
+}
+.panel-main,
+.panel-more {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.panel-more {
+  padding: 4px 0 6px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+.panel-more .glbl {
+  margin-top: 2px;
+}
+.panel-more .note {
+  margin: 0;
+}
+.more-hint {
+  position: absolute;
+  left: 50%;
+  bottom: -1px;
+  transform: translateX(-50%);
+  width: 36px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  color: var(--faint);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s;
+  cursor: pointer;
+}
+.more-hint.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+.more-hint svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  animation: nudge 2.4s ease-in-out infinite;
+}
+@keyframes nudge {
+  50% {
+    transform: translateY(2px);
+  }
+}
+
+/* Filter-Dropdown als Pille */
+.pill.select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 8px 0 0;
+  color: var(--muted);
+}
+.pill.select select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: 500 11.5px var(--sans);
+  padding: 5px 0 5px 10px;
+  width: 92px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  outline: none;
+}
+.pill.select select option {
+  background: #11131c;
+  color: var(--fg);
+}
+.pill.select svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  pointer-events: none;
+}

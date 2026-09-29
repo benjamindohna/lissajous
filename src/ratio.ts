@@ -84,3 +84,22 @@ export function approximate(r: number, tol = 0.03): { a: number; b: number; delt
 }
 
 export const cents = (r: number) => 1200 * Math.log2(r);
+
+/** Intervall-Filter für Buttons und Reglerpunkte (Schlüssel „a:b") */
+export type FilterId = 'harmonisch' | 'alle' | 'dur' | 'moll' | 'pentatonisch' | 'rein';
+
+export const FILTERS: { id: FilterId; name: string; set: string[] | null }[] = [
+  { id: 'harmonisch', name: 'Harmonisch', set: null }, // alle konsonanten
+  { id: 'dur', name: 'Dur', set: ['1:1', '8:9', '4:5', '3:4', '2:3', '3:5', '8:15', '1:2'] },
+  { id: 'moll', name: 'Moll', set: ['1:1', '8:9', '5:6', '3:4', '2:3', '5:8', '9:16', '1:2'] },
+  { id: 'pentatonisch', name: 'Pentatonisch', set: ['1:1', '8:9', '4:5', '2:3', '3:5', '1:2'] },
+  { id: 'rein', name: 'Rein', set: ['1:1', '3:4', '2:3', '1:2'] },
+  { id: 'alle', name: 'Alle', set: null },
+];
+
+export function inFilter(p: Preset, id: FilterId) {
+  if (id === 'alle') return true;
+  if (id === 'harmonisch') return p.consonant;
+  const f = FILTERS.find((x) => x.id === id);
+  return !!f?.set?.includes(`${p.a}:${p.b}`);
+}

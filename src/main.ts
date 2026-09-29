@@ -2,10 +2,11 @@ import './style.css';
 import { Stage, AXIS, MAX_POINTS } from './stage';
 import { pts, cols, PALETTE, paletteIndex, intensity, wobble, setPalette, stepPalette, TAU } from './figure';
 import { AudioEngine, KLAENGE, sustainAmount, type Klang } from './audio';
-import { PRESETS, MAX_TERM, reduce, intervalName, formatNote, approximate, cents } from './ratio';
+import { PRESETS, FILTERS, inFilter, MAX_TERM, reduce, intervalName, formatNote, approximate, cents, type FilterId } from './ratio';
 import { THEMES, hexToRgb, type Theme } from './themes';
 
 type Trail = 'tail' | 'keep';
+type Mapping = 'quick' | 'responsive' | 'none';
 
 const state = {
   r: 1.5, // Frequenzverhältnis B/A (Ziel)
@@ -14,7 +15,8 @@ const state = {
   base: 220,
   playing: true,
   snap: true,
-  allIntervals: false, // sonst nur die harmonischen
+  filter: 'harmonisch' as FilterId,
+  mapping: 'quick' as Mapping,
   axisLabels: false,
   wobble: 0.4,
   tempo: 0.4, // Hz, sichtbare Schwingung von Ton A
@@ -35,6 +37,8 @@ const NEAR_CENTS = 45; // bis hier „fast Quinte"
 const TEMPO_MIN = 0.08;
 const TEMPO_MAX = 24; // ganz rechts: Schläge sind zum gehaltenen Ton verschmolzen
 const BRAKE_TAU = 0.22; // sanftes Bremsen beim Pausieren
+const RESPONSIVE_DELAY = 1.3; // s nach dem Ankommen
+const RESPONSIVE_TAU = 0.45;
 const HEAD_FADE: [number, number] = [2.5, 8]; // Hz: Kopf/Blitzen → ruhige Form (vor dem Stroboskop-Effekt)
 const GLIMMER: [number, number] = [8, 20]; // Hz: leichtes Glimmen/Flimmern der ruhigen Form
 
@@ -126,6 +130,15 @@ if (import.meta.env.DEV) {
     return probeLog;
   };
 }
+/** Phase der gezeigten Figur, auf eine Figurenperiode gestreckt: 0..2π, 0 = perfekte Form */
+function figurePhase() {
+  const { a, b } = fig;
+  const psi = off + (rNow - b / a) * thA - state.phase;
+  const per = TAU / a;
+  return (((psi % per) + per) % per) * a;
+}
+let manualPhase = false; // Phase von Hand gesetzt: Mapping wartet auf die nächste Verhältnisänderung
+let arrivedAt = 0; // Zeitpunkt, an dem zuletzt ein sauberes Intervall gewählt wurde
 const hash = (x: number) => {
   const h = Math.sin(x * 127.1 + 311.7) * 43758.5453;
   return h - Math.floor(h);
@@ -135,7 +148,7 @@ const freqB = () => state.base * rNow;
 
 // Intervalle in Reglerreihenfolge (tief → hoch)
 const byPitch = [...PRESETS].sort((p, q) => p.b / p.a - q.b / q.a);
-const visiblePresets = () => byPitch.filter((p) => state.allIntervals || p.consonant);
+const visiblePresets = () => byPitch.filter((p) => inFilter(p, state.filter));
 
 function nearestPreset(r: number) {
   let best = visiblePresets()[0];
@@ -153,6 +166,7 @@ function nearestPreset(r: number) {
 /* ---------- Anzeige ---------- */
 
 const panel = $('panel');
+const phaseVal = $('phaseVal');
 const top = $('top');
 const labA = $('labA');
 const labB = $('labB');
@@ -178,7 +192,6 @@ function updateTexts() {
   const fb = state.base * state.r;
   labB.innerHTML = `<b>B</b>${fmt(fb, 0)} Hz · ${formatNote(fb)}`;
   $('baseVal').textContent = `${fmt(state.base, 0)} Hz · ${formatNote(state.base)}`;
-  $('phaseVal').textContent = `${Math.round((state.phase / TAU) * 360)}°`;
   $('wobbleVal').textContent = state.wobble === 0 ? 'aus' : `${Math.round(state.wobble * 100)} %`;
   $('tempoVal').textContent =
     `${fmt(state.tempo, state.tempo < 1 ? 2 : state.tempo < 10 ? 1 : 0)} Hz`;
@@ -222,6 +235,8 @@ function setExact(a: number, b: number) {
   state.exact = [a, b];
   state.r = b / a;
   fig = { a, b, delta: 0 };
+  manualPhase = false;
+  arrivedAt = time;
   rSlider.value = String(sliderFromRatio(state.r));
   updateTexts();
 }
@@ -231,6 +246,7 @@ function setFree(r: number) {
   state.exact = null;
   state.r = r;
   fig = approximate(r);
+  manualPhase = false;
   updateTexts();
 }
 
@@ -261,15 +277,27 @@ function applyKlang(k: Klang) {
   store.set('klang', k);
 }
 
-function setAllIntervals(on: boolean) {
-  state.allIntervals = on;
-  $('allBtn').classList.toggle('on', on);
+function setFilter(id: FilterId) {
+  state.filter = id;
+  filterSel.value = id;
   document.querySelectorAll<HTMLElement>('[data-a]').forEach((el) => {
     const p = byPitch.find((q) => q.a === +el.dataset.a! && q.b === +el.dataset.b!);
-    el.hidden = !on && !!p && !p.consonant;
+    el.hidden = !!p && !inFilter(p, id);
   });
-  store.set('allIntervals', on ? '1' : '0');
+  store.set('filter', id);
   updateTexts();
+}
+
+const MAP_NOTES: Record<Mapping, string> = {
+  quick: 'Die Phase folgt beim Ziehen fließend den Intervallen; jedes Intervall kommt in seiner perfekten Form an.',
+  responsive: 'Die Phase bleibt beim Ziehen frei; auf einem Intervall angekommen, passt sie sich nach gut einer Sekunde sanft an.',
+  none: 'Die Phase wird nie automatisch verändert, nur mit dem Regler oben.',
+};
+function setMapping(m: Mapping) {
+  state.mapping = m;
+  document.querySelectorAll<HTMLElement>('#mapSeg button').forEach((b) => b.classList.toggle('on', b.dataset.map === m));
+  $('mapNote').textContent = MAP_NOTES[m];
+  store.set('mapping', m);
 }
 
 function setAxisLabels(on: boolean) {
@@ -334,7 +362,12 @@ byPitch.forEach((p) => {
   m.style.left = `${Math.log2(p.b / p.a) * 100}%`;
   marksEl.appendChild(m);
 });
-$('allBtn').addEventListener('click', () => setAllIntervals(!state.allIntervals));
+const filterSel = $<HTMLSelectElement>('filterSel');
+for (const f of FILTERS) filterSel.add(new Option(f.name, f.id));
+filterSel.addEventListener('change', () => setFilter(filterSel.value as FilterId));
+document.querySelectorAll<HTMLButtonElement>('#mapSeg button').forEach((b) =>
+  b.addEventListener('click', () => setMapping(b.dataset.map as Mapping)),
+);
 
 // Verhältnis-Regler: frei ziehen, beim Loslassen einrasten
 rSlider.addEventListener('input', () => setFree(ratioFromSlider(+rSlider.value)));
@@ -453,12 +486,20 @@ baseSlider.addEventListener('input', () => {
   updateTexts();
 });
 
+// Phase: zeigt die Phase der aktuellen Figur (0° = perfekte Form) und bewegt sich
+// mit, wenn das Mapping sie verändert. Von Hand verstellt, bleibt sie so, bis man
+// wieder am Verhältnis dreht oder ein Intervall antippt.
 const phaseSlider = $<HTMLInputElement>('phase');
+let phaseDragging = false;
+phaseSlider.addEventListener('pointerdown', () => (phaseDragging = true));
+window.addEventListener('pointerup', () => (phaseDragging = false));
+window.addEventListener('pointercancel', () => (phaseDragging = false));
 phaseSlider.addEventListener('input', () => {
-  const next = (+phaseSlider.value / 360) * TAU;
-  off += next - state.phase;
-  state.phase = next;
-  updateTexts();
+  const a = fig.a;
+  let diff = (+phaseSlider.value / 360) * TAU - figurePhase();
+  diff -= Math.round(diff / TAU) * TAU;
+  off += diff / a;
+  manualPhase = true;
 });
 const wobbleSlider = $<HTMLInputElement>('wobble');
 wobbleSlider.addEventListener('input', () => {
@@ -512,6 +553,22 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+// Bedienfeld: sichtbar bleibt genau der Hauptteil, der Rest wird hochgescrollt
+const panelScroll = $('panelScroll');
+const panelMain = $('panelMain');
+const moreHint = $('moreHint');
+const fitPanel = () => {
+  panelScroll.style.height = `${panelMain.offsetHeight}px`;
+  updateMoreHint();
+};
+const updateMoreHint = () => {
+  const atEnd = panelScroll.scrollTop + panelScroll.clientHeight >= panelScroll.scrollHeight - 4;
+  panelScroll.classList.toggle('at-end', atEnd);
+  moreHint.classList.toggle('show', panelScroll.scrollTop < 8 && !atEnd);
+};
+panelScroll.addEventListener('scroll', updateMoreHint, { passive: true });
+moreHint.addEventListener('click', () => panelScroll.scrollBy({ top: panelMain.offsetHeight * 0.8, behavior: 'smooth' }));
+new ResizeObserver(fitPanel).observe(panelMain);
 new ResizeObserver(layout).observe(panel);
 window.addEventListener('resize', layout);
 
@@ -584,7 +641,14 @@ function scheduleHits(tempoEff: number, thB: number) {
  * Die Reaktionszeit hängt daran, wie gut man die Figur sieht: ganz → sofort.
  */
 function pullPhase(dt: number) {
+  if (manualPhase || state.mapping === 'none') return;
   const moving = rNow !== state.r;
+  if (state.mapping === 'responsive') {
+    // nur auf einem sauberen Intervall, nach kurzer Pause, sanft
+    if (!state.exact || moving || time - arrivedAt < RESPONSIVE_DELAY) return;
+    off -= phaseError(state.exact[0]) * (1 - Math.exp(-dt / RESPONSIVE_TAU));
+    return;
+  }
   let e: number;
   let a: number; // Figur, deren Sichtbarkeit die Reaktionszeit bestimmt
   if (moving) {
@@ -780,6 +844,9 @@ function frame(now: number) {
   audio.setSolo(holdingBase);
   if (holdingBase) audio.hold(0);
   playBtn.classList.toggle('wait', state.playing && !audio.ready);
+  const ph = Math.round((figurePhase() / TAU) * 360) % 360;
+  if (!phaseDragging && +phaseSlider.value !== ph) phaseSlider.value = String(ph);
+  if (phaseVal.textContent !== `${ph}°`) phaseVal.textContent = `${ph}°`;
 
   stage.render(dt);
   if (!state.zen && state.axisLabels) placeAxisLabels();
@@ -796,7 +863,10 @@ const savedVol = store.get('volume');
 if (savedVol !== null && !Number.isNaN(+savedVol)) state.volume = Math.min(1, Math.max(0, +savedVol));
 audio.setVolume(state.volume);
 volumeSlider.value = String(Math.round(state.volume * 100));
-setAllIntervals(store.get('allIntervals') === '1');
+const savedFilter = store.get('filter') as FilterId | null;
+setFilter(FILTERS.some((f) => f.id === savedFilter) ? savedFilter! : 'harmonisch');
+const savedMap = store.get('mapping') as Mapping | null;
+setMapping(savedMap === 'responsive' || savedMap === 'none' ? savedMap : 'quick');
 setAxisLabels(store.get('axisLabels') === '1');
 
 baseSlider.value = String(Math.round((1000 * Math.log2(state.base / 110)) / 3));
